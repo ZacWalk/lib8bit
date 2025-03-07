@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx</Extensions>
+    </Filter>
+    <Filter Include="Test Data">
+      <UniqueIdentifier>{ac40fe78-ed34-4a75-9f2e-840fb0ca040a}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="emulator-tests.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="1942.d64"><Filter>Test Data</Filter></None>
+    <None Include="example.prg"><Filter>Test Data</Filter></None>
+    <None Include="gng_bl.crt"><Filter>Test Data</Filter></None>
+    <None Include="pitfall.crt"><Filter>Test Data</Filter></None>
+    <None Include="river_raid.crt"><Filter>Test Data</Filter></None>
+  </ItemGroup>
+</Project>

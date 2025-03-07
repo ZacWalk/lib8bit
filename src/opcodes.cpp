@@ -1,3 +1,8 @@
+// lib8bit by Zac Walker
+//
+// 6502 opcode table data: maps each of the 256 byte values to its length,
+// mnemonic and addressing mode (see opcodes.h).
+
 //opcodes_table = {
 // "unknown"
 // "implied"
@@ -15,17 +20,11 @@
 // "relative"
 
 
-struct opcode
-{
-	const char* byte;
-	int length;
-	const char* name;
-	const char* addressing_mode;
-};
+#include "opcodes.h"
 
 // byte (unused), instruction length, instruction name, addressing mode
 
-opcode opcodes[] =
+const opcode opcodes[256] =
 {
 	"00", 1, "BRK", "implied", // BRK
 	"01", 2, "ORA", "($indirect,X)", // ORA ($00,X)

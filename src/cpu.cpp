@@ -1,3 +1,8 @@
+// lib8bit by Zac Walker
+//
+// 6502 CPU core: instruction execution, addressing modes, arithmetic and
+// flag handling, the stack, and IRQ/NMI interrupt servicing.
+
 #include <stdint.h>
 
 #include "cpu.h"
@@ -8,14 +13,14 @@
 
 
 //general functions used by various other functions
-void push16(machine_state* s, uint16_t pushval)
+void push16(machine_state* s, const uint16_t pushval)
 {
 	s->ram_write(BASE_STACK + s->cpu.sp, (pushval >> 8) & 0xFF);
 	s->ram_write(BASE_STACK + ((s->cpu.sp - 1) & 0xFF), pushval & 0xFF);
 	s->cpu.sp -= 2;
 }
 
-void push8(machine_state* s, uint8_t pushval)
+void push8(machine_state* s, const uint8_t pushval)
 {
 	s->ram_write(BASE_STACK + s->cpu.sp--, pushval);
 }
@@ -86,9 +91,10 @@ uint16_t abso(machine_state* s)
 uint16_t absx(machine_state* s)
 {
 	//absolute,s->cpu.x
-	const auto ea = (static_cast<uint16_t>(s->ram_read(s->cpu.pc)) | (static_cast<uint16_t>(s->ram_read(s->cpu.pc + 1))
-			<< 8))
-		+ static_cast<uint16_t>(s->cpu.x);
+	const auto base = static_cast<uint16_t>(s->ram_read(s->cpu.pc)) |
+		(static_cast<uint16_t>(s->ram_read(s->cpu.pc + 1)) << 8);
+	const auto ea = static_cast<uint16_t>(base + s->cpu.x);
+	if ((ea & 0xFF00) != (base & 0xFF00)) s->penalty_addr = 1; // page crossed
 	s->cpu.pc += 2;
 	return ea;
 }
@@ -96,9 +102,10 @@ uint16_t absx(machine_state* s)
 uint16_t absy(machine_state* s)
 {
 	//absolute,s->cpu.y
-	const auto ea = (static_cast<uint16_t>(s->ram_read(s->cpu.pc)) | (static_cast<uint16_t>(s->ram_read(s->cpu.pc + 1))
-			<< 8))
-		+ static_cast<uint16_t>(s->cpu.y);
+	const auto base = static_cast<uint16_t>(s->ram_read(s->cpu.pc)) |
+		(static_cast<uint16_t>(s->ram_read(s->cpu.pc + 1)) << 8);
+	const auto ea = static_cast<uint16_t>(base + s->cpu.y);
+	if ((ea & 0xFF00) != (base & 0xFF00)) s->penalty_addr = 1; // page crossed
 	s->cpu.pc += 2;
 	return ea;
 }
@@ -131,8 +138,9 @@ uint16_t indy(machine_state* s)
 
 	const auto ea1 = static_cast<uint16_t>(s->ram_read(s->cpu.pc++));
 	const auto ea2 = (ea1 & 0xFF00) | ((ea1 + 1) & 0x00FF); //zero-page wraparound
-	const auto ea = (static_cast<uint16_t>(s->ram_read(ea1)) | (static_cast<uint16_t>(s->ram_read(ea2)) << 8))
-		+ static_cast<uint16_t>(s->cpu.y);
+	const auto base = static_cast<uint16_t>(s->ram_read(ea1)) | (static_cast<uint16_t>(s->ram_read(ea2)) << 8);
+	const auto ea = static_cast<uint16_t>(base + s->cpu.y);
+	if ((ea & 0xFF00) != (base & 0xFF00)) s->penalty_addr = 1; // page crossed
 	return ea;
 }
 
@@ -141,17 +149,17 @@ static uint16_t get_ea(machine_state* s, const uint16_t ea)
 	return s->ram_read(ea);
 }
 
-static uint16_t get_a(machine_state* s)
+static uint16_t get_a(const machine_state* s)
 {
 	return s->cpu.a;
 }
 
-void put_ea(machine_state* s, uint16_t saveval, const uint16_t ea)
+void put_ea(machine_state* s, const uint16_t saveval, const uint16_t ea)
 {
 	s->ram_write(ea, (saveval & 0x00FF));
 }
 
-void put_a(machine_state* s, uint16_t saveval)
+void put_a(machine_state* s, const uint16_t saveval)
 {
 	s->cpu.a = static_cast<uint8_t>(saveval & 0x00FF);
 }
@@ -202,7 +210,7 @@ uint16_t op_and(machine_state* s, const uint16_t value)
 	return result;
 }
 
-uint16_t asl(machine_state* s, uint16_t value)
+uint16_t asl(machine_state* s, const uint16_t value)
 {
 	const auto result = value << 1;
 
@@ -225,7 +233,7 @@ void bcc(machine_state* s, const uint16_t reladdr)
 	}
 }
 
-void bcs(machine_state* s, uint16_t reladdr)
+void bcs(machine_state* s, const uint16_t reladdr)
 {
 	if ((s->cpu.status & FLAG_CARRY) == FLAG_CARRY)
 	{
@@ -237,7 +245,7 @@ void bcs(machine_state* s, uint16_t reladdr)
 	}
 }
 
-void beq(machine_state* s, uint16_t reladdr)
+void beq(machine_state* s, const uint16_t reladdr)
 {
 	if ((s->cpu.status & FLAG_ZERO) == FLAG_ZERO)
 	{
@@ -249,7 +257,7 @@ void beq(machine_state* s, uint16_t reladdr)
 	}
 }
 
-void op_bit(machine_state* s, uint16_t value)
+void op_bit(machine_state* s, const uint16_t value)
 {
 	const auto result = static_cast<uint16_t>(s->cpu.a) & value;
 
@@ -257,7 +265,7 @@ void op_bit(machine_state* s, uint16_t value)
 	s->cpu.status = (s->cpu.status & 0x3F) | static_cast<uint8_t>(value & 0xC0);
 }
 
-void bmi(machine_state* s, uint16_t reladdr)
+void bmi(machine_state* s, const uint16_t reladdr)
 {
 	if ((s->cpu.status & FLAG_SIGN) == FLAG_SIGN)
 	{
@@ -269,7 +277,7 @@ void bmi(machine_state* s, uint16_t reladdr)
 	}
 }
 
-void bne(machine_state* s, uint16_t reladdr)
+void bne(machine_state* s, const uint16_t reladdr)
 {
 	if ((s->cpu.status & FLAG_ZERO) == 0)
 	{
@@ -281,7 +289,7 @@ void bne(machine_state* s, uint16_t reladdr)
 	}
 }
 
-void bpl(machine_state* s, uint16_t reladdr)
+void bpl(machine_state* s, const uint16_t reladdr)
 {
 	if ((s->cpu.status & FLAG_SIGN) == 0)
 	{
@@ -302,7 +310,7 @@ void brk(machine_state* s)
 	s->cpu.pc = static_cast<uint16_t>(s->ram_read(0xFFFE)) | (static_cast<uint16_t>(s->ram_read(0xFFFF)) << 8);
 }
 
-void bvc(machine_state* s, uint16_t reladdr)
+void bvc(machine_state* s, const uint16_t reladdr)
 {
 	if ((s->cpu.status & FLAG_OVERFLOW) == 0)
 	{
@@ -314,7 +322,7 @@ void bvc(machine_state* s, uint16_t reladdr)
 	}
 }
 
-void bvs(machine_state* s, uint16_t reladdr)
+void bvs(machine_state* s, const uint16_t reladdr)
 {
 	if ((s->cpu.status & FLAG_OVERFLOW) == FLAG_OVERFLOW)
 	{
@@ -346,7 +354,7 @@ void clv(machine_state* s)
 	s->cpu.clear_overflow();
 }
 
-void cmp(machine_state* s, uint16_t value)
+void cmp(machine_state* s, const uint16_t value)
 {
 	const auto result = static_cast<uint16_t>(s->cpu.a) - value;
 
@@ -363,7 +371,7 @@ void cmp(machine_state* s, uint16_t value)
 	s->cpu.calc_sign(result);
 }
 
-void cpx(machine_state* s, uint16_t value)
+void cpx(machine_state* s, const uint16_t value)
 {
 	const auto result = static_cast<uint16_t>(s->cpu.x) - value;
 
@@ -380,7 +388,7 @@ void cpx(machine_state* s, uint16_t value)
 	s->cpu.calc_sign(result);
 }
 
-void cpy(machine_state* s, uint16_t value)
+void cpy(machine_state* s, const uint16_t value)
 {
 	const auto result = static_cast<uint16_t>(s->cpu.y) - value;
 
@@ -395,7 +403,7 @@ void cpy(machine_state* s, uint16_t value)
 	s->cpu.calc_sign(result);
 }
 
-uint16_t dec(machine_state* s, uint16_t value)
+uint16_t dec(machine_state* s, const uint16_t value)
 {
 	const auto result = value - 1;
 
@@ -421,7 +429,7 @@ void dey(machine_state* s)
 	s->cpu.calc_sign(s->cpu.y);
 }
 
-uint16_t eor(machine_state* s, uint16_t value)
+uint16_t eor(machine_state* s, const uint16_t value)
 {
 	const auto result = static_cast<uint16_t>(s->cpu.a) ^ value;
 
@@ -431,7 +439,7 @@ uint16_t eor(machine_state* s, uint16_t value)
 	return result;
 }
 
-uint16_t inc(machine_state* s, uint16_t value)
+uint16_t inc(machine_state* s, const uint16_t value)
 {
 	const auto result = value + 1;
 
@@ -468,7 +476,7 @@ void jsr(machine_state* s, const uint16_t ea)
 	s->cpu.pc = ea;
 }
 
-void lda(machine_state* s, uint16_t value)
+void lda(machine_state* s, const uint16_t value)
 {
 	s->cpu.a = static_cast<uint8_t>(value & 0x00FF);
 
@@ -476,7 +484,7 @@ void lda(machine_state* s, uint16_t value)
 	s->cpu.calc_sign(s->cpu.a);
 }
 
-void ldx(machine_state* s, uint16_t value)
+void ldx(machine_state* s, const uint16_t value)
 {
 	s->cpu.x = static_cast<uint8_t>(value & 0x00FF);
 
@@ -484,7 +492,7 @@ void ldx(machine_state* s, uint16_t value)
 	s->cpu.calc_sign(s->cpu.x);
 }
 
-void ldy(machine_state* s, uint16_t value)
+void ldy(machine_state* s, const uint16_t value)
 {
 	s->cpu.y = static_cast<uint8_t>(value & 0x00FF);
 
@@ -492,7 +500,7 @@ void ldy(machine_state* s, uint16_t value)
 	s->cpu.calc_sign(s->cpu.y);
 }
 
-uint16_t lsr(machine_state* s, uint16_t value)
+uint16_t lsr(machine_state* s, const uint16_t value)
 {
 	const auto result = value >> 1;
 
@@ -511,7 +519,7 @@ void nop(machine_state* s)
 {
 }
 
-uint16_t ora(machine_state* s, uint16_t value)
+uint16_t ora(machine_state* s, const uint16_t value)
 {
 	const auto result = static_cast<uint16_t>(s->cpu.a) | value;
 
@@ -544,7 +552,7 @@ void plp(machine_state* s)
 	s->cpu.status = pull8(s) | FLAG_CONSTANT;
 }
 
-uint16_t rol(machine_state* s, uint16_t value)
+uint16_t rol(machine_state* s, const uint16_t value)
 {
 	const auto result = (value << 1) | (s->cpu.status & FLAG_CARRY);
 
@@ -555,7 +563,7 @@ uint16_t rol(machine_state* s, uint16_t value)
 	return result;
 }
 
-uint16_t ror(machine_state* s, uint16_t value)
+uint16_t ror(machine_state* s, const uint16_t value)
 {
 	const auto result = (value >> 1) | ((s->cpu.status & FLAG_CARRY) << 7);
 
@@ -582,7 +590,7 @@ void rts(machine_state* s)
 	s->cpu.pc = value + 1;
 }
 
-uint16_t sbc(machine_state* s, uint16_t value)
+uint16_t sbc(machine_state* s, const uint16_t value)
 {
 	const auto operand = value & 0x00FF;
 	const auto inv = operand ^ 0x00FF;
@@ -685,12 +693,36 @@ void nmi6502(machine_state* s)
 void cpu_irq(machine_state* s)
 {
 	push16(s, s->cpu.pc);
-	// 6502 IRQ pushes only PC and status. It must NOT push A/X/Y -- doing so
-	// corrupts the stack and breaks any RTI in the kernal IRQ handler.
+	// A hardware IRQ pushes only PC and status with BREAK cleared and CONSTANT set.
 	push8(s, (s->cpu.status | FLAG_CONSTANT) & ~FLAG_BREAK);
 	s->cpu.set_interrupt();
-	// On the C64 the kernal installs a vector at $0314/$0315 and jumps through it.
-	s->cpu.pc = static_cast<uint16_t>(s->ram_read(0x0314)) | (static_cast<uint16_t>(s->ram_read(0x0315)) << 8);
+	// Vector through the real 6502 IRQ vector at $FFFE, which on the C64 points at
+	// the kernal entry ($FF48). That entry saves A/X/Y on the stack before doing
+	// JMP ($0314) to the user handler at $EA31; the handler restores A/X/Y and RTIs.
+	// Jumping straight to $0314 here would skip the register save, so the handler's
+	// closing PLA/PLA/PLA would unbalance the stack and RTI to a garbage address.
+	s->cpu.pc = static_cast<uint16_t>(s->ram_read(0xFFFE)) | (static_cast<uint16_t>(s->ram_read(0xFFFF)) << 8);
+}
+
+// Read instructions using abs,X / abs,Y / (ind),Y that pay the page-cross
+// penalty (one extra cycle when the effective address crosses a page).
+constexpr bool penalty_op(const uint8_t opcode)
+{
+	switch (opcode)
+	{
+	case 0x1D: case 0x19: case 0x11: // ORA
+	case 0x3D: case 0x39: case 0x31: // AND
+	case 0x5D: case 0x59: case 0x51: // EOR
+	case 0x7D: case 0x79: case 0x71: // ADC
+	case 0xBD: case 0xB9: case 0xB1: // LDA
+	case 0xBE:                       // LDX abs,Y
+	case 0xBC:                       // LDY abs,X
+	case 0xDD: case 0xD9: case 0xD1: // CMP
+	case 0xFD: case 0xF9: case 0xF1: // SBC
+		return true;
+	default:
+		return false;
+	}
 }
 
 constexpr uint8_t ticktable[256] = {
@@ -713,6 +745,30 @@ constexpr uint8_t ticktable[256] = {
 };
 
 
+// Service a pending interrupt at an instruction boundary, mirroring the 6510's
+// behaviour: NMI is edge-triggered and always taken; IRQ is level-triggered and
+// taken only while the interrupt-disable flag is clear. Either takes 7 cycles.
+static bool cpu_service_interrupts(machine_state* s)
+{
+	if (s->nmi_pending)
+	{
+		s->nmi_pending = false;
+		nmi6502(s);
+		s->clock_ticks += 7;
+		return true;
+	}
+
+	if (s->irq_pending && (s->cpu.status & FLAG_INTERRUPT) == 0)
+	{
+		cpu_irq(s);
+		s->clock_ticks += 7;
+		return true;
+	}
+
+	return false;
+}
+
+
 void cpu_exec(machine_state* s, const int32_t tick_count)
 {
 	uint16_t ea;
@@ -721,8 +777,17 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 
 	while (clock_limit > s->clock_ticks)
 	{
+		const int64_t cycles_before = s->clock_ticks;
+
+		if (cpu_service_interrupts(s))
+		{
+			s->step_hardware(static_cast<int32_t>(s->clock_ticks - cycles_before));
+			continue;
+		}
+
 		const auto opcode = s->ram_read(s->cpu.pc++);
 		s->cpu.status |= FLAG_CONSTANT;
+		s->penalty_addr = 0;
 
 		switch (opcode)
 		{
@@ -1321,6 +1386,10 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 		}
 
 		s->clock_ticks += static_cast<int32_t>(ticktable[opcode]);
+		// 6502 read instructions with abs,X / abs,Y / (ind),Y addressing take one
+		// extra cycle when the effective address crosses a page boundary.
+		if (s->penalty_addr && penalty_op(opcode)) s->clock_ticks += 1;
 		s->instruction_count++;
+		s->step_hardware(static_cast<int32_t>(s->clock_ticks - cycles_before));
 	}
 }

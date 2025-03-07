@@ -1,3 +1,7 @@
+// lib8bit by Zac Walker
+//
+// Commodore BASIC V2 ROM image (8 KB) as a byte array.
+
 #include <stdint.h>
 
 uint8_t rom_basic[8192] = {
