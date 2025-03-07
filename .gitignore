@@ -1,3 +1,5 @@
 .vs/
 intermediate/
-exe/
+bin/
+tmp/
+debug_trace.log
