@@ -1,5 +1,9 @@
 #pragma once
 
+// lib8bit by Zac Walker
+//
+// 6502 CPU core interface: instruction execution and IRQ/NMI entry points.
+
 struct machine_state;
 
 uint16_t getpc();

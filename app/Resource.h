@@ -1,6 +1,10 @@
 //{{NO_DEPENDENCIES}}
 // Microsoft Visual C++ generated include file.
 // Used by c64.rc
+//
+// lib8bit by Zac Walker
+//
+// Resource identifiers for the Win32 test app (icon, menus, dialogs, strings).
 
 #define IDS_APP_TITLE			103
 

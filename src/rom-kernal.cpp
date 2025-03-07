@@ -1,3 +1,7 @@
+// lib8bit by Zac Walker
+//
+// Commodore 64 KERNAL ROM image (8 KB) as a byte array.
+
 #include <stdint.h>
 
 uint8_t rom_kernal[8192] = {

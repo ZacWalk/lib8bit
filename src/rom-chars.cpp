@@ -1,3 +1,7 @@
+// lib8bit by Zac Walker
+//
+// Commodore 64 character generator ROM image (4 KB) as a byte array.
+
 #include <stdint.h>
 
 uint8_t rom_chars[4096] = {
