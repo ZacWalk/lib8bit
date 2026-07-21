@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.configuration }} x64)
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build solution
+        run: msbuild lib8bit.sln /m /nologo /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          $suffix = if ('${{ matrix.configuration }}' -eq 'Release') { '64r' } else { '64d' }
+          $exe = ".\bin\test8bit$suffix.exe"
+          if (-not (Test-Path $exe)) { throw "Test executable not found: $exe" }
+          & $exe
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE" }
