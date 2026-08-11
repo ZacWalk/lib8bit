@@ -30,7 +30,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Position = 0)]
     [ValidateSet('test', 'run')]
     [string]$Command,
 
@@ -43,6 +43,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+
+if (-not $Command) {
+    Write-Host 'Usage: .\dd.ps1 COMMAND [options]'
+    Write-Host ''
+    Write-Host 'Commands:'
+    Write-Host '  test    Build and run the emulator tests (Debug by default)'
+    Write-Host '  run     Build and launch the GUI test app (Release by default)'
+    Write-Host ''
+    Write-Host 'Options: -Release, -DebugBuild, -Win32'
+    exit 0
+}
 
 # Resolve configuration: explicit -Release/-DebugBuild win; otherwise 'run'
 # defaults to Release and 'test' defaults to Debug.
