@@ -2,180 +2,120 @@
 
 [![CI](https://github.com/ZacWalk/lib8bit/actions/workflows/ci.yml/badge.svg)](https://github.com/ZacWalk/lib8bit/actions/workflows/ci.yml)
 
-lib8bit is a compact Commodore 64 emulator packaged as a C++ static library.
-It is intended for embedding in applications such as Diffractor to add retro
-computer support. A separate Windows test app exercises the emulator: it renders
-the full VIC-II picture with GDI, plays SID audio through waveOut, and loads
-`.prg`, `.crt`, and `.d64`/`.d71`/`.d81` files via a file dialog or drag-and-drop.
+A compact Commodore 64 emulator packaged as a C++20 static library, plus a small
+Win32 app that drives it.
+
+The library is platform independent and does no file I/O — the host supplies
+bytes, the library returns a frame buffer and audio samples. It is intended for
+embedding in applications such as Diffractor to add retro computer support.
 
 Repository: <https://github.com/ZacWalk/lib8bit>
 
-The emulator covers the 6510 CPU, full memory banking, the VIC-II (all graphics
-modes plus sprites and raster interrupts), the SID sound chip, both CIA timer
-chips with the keyboard matrix and joysticks, and cartridge bank switching. It
-can also inspect Commodore disk images without full IEC/1541 drive emulation.
+## What is emulated
 
-## Projects
+| Chip | Coverage |
+|------|----------|
+| 6510 CPU | All documented opcodes and addressing modes (including the indirect-`JMP` page-wrap bug), BCD arithmetic, `BRK`/`RTI`/`IRQ`/`NMI`, cycle-accurate timing with page-crossing penalties |
+| Memory | Full banking through the processor port at `$00`/`$01`, BASIC/KERNAL/character ROMs, the I/O area |
+| VIC-II | 384×272 raster renderer: text, multicolor text, bitmap and multicolor bitmap modes, 8 sprites with expansion, priority and collisions, raster interrupts, 16-colour VICE palette |
+| SID | 6581/8580, three voices with ADSR envelopes, multi-mode filter, `.sid` (PSID/RSID) playback through the installed player driver, with an on-screen player: tune details, live voice meters, and sub-tune selection on the number keys |
+| CIA ×2 | Timers, interrupts, the full keyboard matrix, two joysticks |
+| Cartridge | `.crt` loading with ROML/ROMH banking |
+| Disk | `.d64`/`.d71`/`.d81` mounted as device 8: the KERNAL LOAD routine is serviced from the image, so a program can keep loading files while it runs, and `LOAD"$",8` lists the directory |
 
-- `src/lib8bit.vcxproj` builds the platform-independent emulator as
-  `lib8bit.lib`.
-- `app/lib8bit-test.vcxproj` builds the Win32 test app and links `lib8bit` via
-  a Visual Studio project reference.
-- `test/lib8bit-tests.vcxproj` builds a command-line behavioral test suite.
-- `lib8bit.sln` contains all three projects for Win32 and x64 Debug/Release builds.
+Also included: `.prg` loading and a two-pass 6502 assembler.
 
-## Build
+How it all fits together is in [docs/design.md](docs/design.md). What is missing
+or approximate is in [docs/todo.md](docs/todo.md) — headline gaps are the
+undocumented CPU opcodes, the IEC serial bus (so a program supplying its own
+fastloader will not load), SAVE to disk, VIC bad-line cycle stealing and CIA TOD
+clocks.
 
-Open `lib8bit.sln` in Visual Studio 2026 and build the desired configuration,
-or run:
+## Layout
+
+| Path | Contents |
+|------|----------|
+| `src/` | The emulator. Platform independent — no Windows headers, no file system. Builds `lib8bit.lib`. |
+| `app/` | Win32 test app: GDI video, waveOut audio, menus, drag-and-drop. |
+| `test/` | Command-line behavioural test suite and its fixtures. |
+| `docs/` | [design.md](docs/design.md) (architecture) and [todo.md](docs/todo.md) (gaps). |
+
+## Build and run
+
+```powershell
+.\dd.ps1 test   # build + run the test suite
+.\dd.ps1 run    # build + launch the Win32 app
+```
+
+Or with MSBuild directly:
 
 ```powershell
 msbuild lib8bit.sln /m /p:Configuration=Release /p:Platform=x64
 ```
 
-All build outputs are written to the `bin/` folder. Binaries follow the naming
-convention `<name><64|32><r|d>`, where the digits are the architecture
-(`64` = x64, `32` = Win32) and the letter is the configuration (`d` = Debug,
-`r` = Release):
+Binaries land in `bin/` as `<name><64|32><r|d>` — architecture then
+configuration, e.g. `lib8bit64d.lib`, `app8bit64r.exe`, `test8bit64d.exe`.
+Intermediate artifacts go under `intermediate/`.
 
-| Project | Debug x64 | Release x64 | Debug Win32 | Release Win32 |
-|---------|-----------|-------------|-------------|---------------|
-| Static library | `lib8bit64d.lib` | `lib8bit64r.lib` | `lib8bit32d.lib` | `lib8bit32r.lib` |
-| Test app | `app8bit64d.exe` | `app8bit64r.exe` | `app8bit32d.exe` | `app8bit32r.exe` |
-| Tests | `test8bit64d.exe` | `test8bit64r.exe` | `test8bit32d.exe` | `test8bit32r.exe` |
+## The app
 
-Intermediate build artifacts (`.obj`, `.tlog`, etc.) go under `intermediate/`.
+Open a `.prg`, `.crt`, `.sid`, `.d64`, `.d71` or `.d81` through **File > Open**,
+by dragging it onto the window, or by passing it on the command line. A disk
+image stays in the drive after its first program starts, so games that load more
+data as they run work. The title bar always states the current machine state:
+media, input mode, pause, and whether audio started. Window position and the
+debug panel's width and visibility are remembered in
+`%APPDATA%\lib8bit\lib8bit.ini`.
 
-To embed the emulator, add a reference to `src/lib8bit.vcxproj` or include
-`src/machine.h` and link the matching `lib8bit<arch><cfg>.lib`. The consuming
-project must use the same architecture, configuration, and C runtime library.
+| | |
+|---|---|
+| Ctrl+O / Ctrl+R / Ctrl+E | Open, Reset (keeps the cartridge), Eject Media |
+| F9 | Pause |
+| Input menu | Arrow keys act as cursor keys, Joystick 1, or Joystick 2 |
+| Help > Keyboard | The emulated C64 key mapping |
 
-### dd.ps1 helper
+A `.sid` tune comes up in a player screen showing its name, author, release,
+chip and timing, a running clock, live per-voice level meters and the list of
+sub-tunes. Keys **1**-**9** pick a sub-tune and **X** stops playback and returns
+the machine to BASIC.
 
-`dd.ps1` builds and then runs a target in one step (defaults to Debug x64):
+## Embedding
 
-```powershell
-.\dd.ps1 test           # build + run the emulator tests
-.\dd.ps1 run            # build + launch the Win32 test app
-.\dd.ps1 run -Release   # Release build
-.\dd.ps1 test -Win32    # 32-bit build
-```
+Add a project reference to `src/lib8bit.vcxproj`, include `src/machine.h`, and
+link the matching `lib8bit<arch><cfg>.lib`. The consuming project must use the
+same architecture, configuration and C runtime library.
 
-It locates MSBuild through `vswhere`, so no Visual Studio developer prompt is
-required.
+`machine` owns a `machine_state` and is non-copyable. Feed it bytes
+(`load_prg`, `load_crt`, `load_sid`, `insert_disk`), step it with `exec(cycles)`,
+then read `framebuffer()` and `generate_audio()`. `app/app.cpp` is a complete
+worked host, and [docs/design.md](docs/design.md) explains the execution model.
 
 ## Tests
 
-Build and run the command-line emulator tests with the helper:
+`test8bit64d.exe` runs ~170 assertions and returns non-zero on failure: every
+documented CPU opcode with flags and cycle counts, pixel-exact VIC-II output for
+each graphics mode and for sprite collisions, CIA timer and interrupt behaviour,
+the assembler, a full KERNAL cold boot to the `READY.` prompt, keyboard input
+evaluating `PRINT 6*7` as `42`, SID audio including a real `.sid` tune, disk
+loading through the KERNAL (a machine-code routine calling `SETNAM`/`SETLFS`/
+`LOAD`, `LOAD"$",8` and the `FILE NOT FOUND` path), and the PRG/CRT/D64 fixtures
+in `test/` (resolved from the source path baked in at compile time, so nothing
+needs copying next to the executable).
+
+It doubles as a small toolbox:
 
 ```powershell
-.\dd.ps1 test
+.\bin\test8bit64d.exe --list-disk .\test\1942.d64            # list a disk image
+.\bin\test8bit64d.exe --run-disk .\test\1942.d64 "1942*"     # mount, LOAD, RUN
+.\bin\test8bit64d.exe --run-prg .\test\example.prg           # boot, load, run a PRG
+.\bin\test8bit64d.exe --run-bin <file> <loadHex> <startHex>  # run a raw 6502 binary
+.\bin\test8bit64d.exe --asm <file.asm>                       # assemble 6502 source
 ```
 
-Or build and run manually:
+## Reference implementation
 
-```powershell
-msbuild lib8bit.sln /t:lib8bit-tests /m /p:Configuration=Debug /p:Platform=x64
-.\bin\test8bit64d.exe
-```
+The JavaScript original is <https://github.com/ZacWalk/turbo8bit>. The native
+port has reached parity on the CPU, memory banking, VIC-II, SID and normal
+8/16 KiB cartridges.
 
-Test fixtures (`example.prg`, `1942.d64`, the `.crt` files) live in `test/` and
-are resolved from the source path baked in at compile time, so they do not need
-to be copied next to the executable.
-
-The suite runs headless unit tests followed by full-machine integration checks.
-It verifies that:
-
-- The 6502 CPU core executes every documented opcode with correct flags,
-  addressing modes, BCD arithmetic, and cycle counts.
-- The VIC-II renders each graphics mode, sprites, sprite collisions, and raster
-  interrupts to the exact expected frame-buffer pixels.
-- The CIA timers count, reload, cascade, and raise interrupts correctly.
-- The built-in 6502 assembler encodes instructions and directives, and
-  round-trips assembled code back through the CPU.
-- The machine boots the BASIC and KERNAL ROMs to the `READY.` prompt, renders the
-  full cold-start screen (the `**** COMMODORE 64 BASIC V2 ****` banner and
-  `38911 BASIC BYTES FREE` line), and keeps it intact while the periodic IRQ runs.
-- Keyboard input via the CIA1 matrix reaches the kernal and evaluates
-  `PRINT 6*7` as `42`.
-- The SID renders non-silent 16-bit PCM for a gated waveform, and plays a real
-  `.sid` tune through its installed player driver.
-- `test/example.prg` loads, runs, and displays `HELLO WORLD`.
-- `test/1942.d64` lists with its disk name and `1942` PRG entry, and individual
-  programs extract from the image.
-- Every CRT fixture parses as a valid CCS64/VICE container, and the normal
-  cartridges map their ROM into the CPU address space.
-
-### Disk Images
-
-`src/disk.h` exposes platform-independent disk-directory parsing for:
-
-- D64: 35-, 40-, and 42-track images, with or without error-byte tables.
-- D71: double-sided 1571 images, with or without error-byte tables.
-- D81: 1581 images, with or without error-byte tables.
-
-Besides the automated suite, the test executable exposes a few command-line
-tools:
-
-```powershell
-.\bin\test8bit64d.exe --list-disk .\test\1942.d64          # list a disk image
-.\bin\test8bit64d.exe --run-prg .\test\example.prg          # boot, load, run a PRG
-.\bin\test8bit64d.exe --run-bin <file> <loadHex> <startHex> # run a raw 6502 binary
-.\bin\test8bit64d.exe --asm <file.asm>                      # assemble 6502 source
-```
-
-The listing includes the PETSCII disk name and ID, file names, file types,
-block counts, open-file markers, and locked-file markers. G64/G71 nibble images,
-T64 tape images, and actual DOS/IEC drive-command execution are not yet
-implemented.
-
-Normal (type 0) 8 KiB and 16 KiB cartridges load and map their ROM into the CPU
-address space. EasyFlash and other bank-switching handlers are the next target:
-
-| Fixture | Hardware type | Status |
-|---------|---------------|--------|
-| `pitfall.crt` | Normal 8 KiB | ROML mapped at `$8000` |
-| `river_raid.crt` | Normal 16 KiB | ROML/ROMH mapped at `$8000`/`$A000` |
-| `gng_bl.crt` | EasyFlash, 64 banks | `$DE00` bank selection and `$DE02` control (pending) |
-
-## JavaScript Parity
-
-The reference implementation is <https://github.com/ZacWalk/turbo8bit>. Most of
-the emulator now has native parity:
-
-- Complete C64 memory banking through processor ports `$0000` and `$0001`.
-- VIC-II character, bitmap, multicolor, sprite, raster, and scrolling behavior.
-- CIA timers, interrupts, keyboard matrix, and joystick input.
-- SID 6581/8580 voices, envelopes, filters, and `.sid` tune playback.
-- Normal 8 KiB and 16 KiB CRT loading with ROML/ROMH banking.
-
-Remaining work:
-
-- EasyFlash and other bank-switching handlers in `$DE00-$DFFF`.
-- IEC serial bus and 1541/1571/1581 drive behavior, building on disk parsing.
-
-## Features
-
-- 6510 / 6502 CPU core
-  - All documented opcodes
-  - All addressing modes including the indirect-`JMP` page-wrap bug
-  - BCD (decimal) mode for `ADC` / `SBC`
-  - `BRK`, `RTI`, `IRQ` and `NMI` with correct stack frames and flag handling
-  - Cycle-accurate timing, including page-crossing penalties
-- Complete C64 memory banking through the processor port at `$0000`/`$0001`,
-  with BASIC, KERNAL, and character ROMs and the I/O area
-- VIC-II raster renderer (384×272 frame buffer)
-  - Standard and multicolor text, standard and multicolor bitmap modes
-  - Eight hardware sprites with multicolor, priority, and collision registers
-  - Raster interrupts and per-scanline register changes for raster splits
-  - Full 16-colour VICE palette
-- SID 6581 / 8580 sound chip
-  - Three voices with selectable waveforms and ADSR envelopes
-  - Multi-mode analog filter model resampled to 16-bit PCM
-  - `.sid` (PSID/RSID) tune playback through the installed player driver
-- Two CIA chips with timers, interrupts, the full keyboard matrix, and two joysticks
-- Cartridge (`.crt`) loading with ROML/ROMH banking
-- `.prg` loading and `.d64`/`.d71`/`.d81` disk-image directory parsing
-- Built-in two-pass 6502 assembler
-- Standalone multithreaded Win32 test app with double-buffered GDI video,
-  gapless waveOut audio, drag-and-drop, and a file dialog
+Contributing, or working on this with an AI agent? See [AGENTS.md](AGENTS.md).
