@@ -6,9 +6,12 @@
 #include "disk.h"
 #include "machine.h"
 #include "assembler.h"
+#include "debug.h"
+#include "opcodes.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -119,6 +122,7 @@ namespace
 			if (entry.locked) std::cout << '<';
 			std::cout << '\n';
 		}
+		std::cout << "  " << directory.free_blocks << " blocks free.\n";
 
 		if (parsed) *parsed = std::move(directory);
 		return true;
@@ -389,7 +393,7 @@ namespace
 		auto setup_text = [](machine& m)
 		{
 			auto* r = m._state->RAM;
-			r[0xD011] = 0x18; // DEN + RSEL, YSCROLL 0
+			r[0xD011] = 0x1B; // DEN + RSEL, YSCROLL 3 (the neutral / KERNAL default)
 			r[0xD016] = 0x08; // CSEL, no MCM
 			r[0xD018] = 0x18; // screen $0400, char/bitmap base $2000 (in RAM, so we control glyphs)
 			r[0xD020] = 14;   // border light blue
@@ -484,8 +488,41 @@ namespace
 			m._state->RAM[0x07F8] = 0x20; m._state->RAM[0x07F9] = 0x20;
 			m._state->RAM[0x0800] = 0x80;
 			m._state->RAM[0xD01E] = 0;
+			m._state->vic.irq_enable = 0x02; // enable the sprite-sprite collision IRQ
 			vic_render_scanline(m._state, 61);
 			tests.check((m._state->RAM[0xD01E] & 0x03) == 0x03, "VIC: sprite-sprite collision flags both sprites");
+			tests.check((m._state->vic.irq_status & 0x02) != 0, "VIC: sprite-sprite collision latches $D019 bit 1");
+			tests.check((m._state->vic.irq_status & 0x80) != 0 && m._state->irq_pending,
+				"VIC: an enabled collision interrupt reaches the CPU");
+		}
+
+		// --- DEN ($D011 bit 4): clearing it blanks the display window ---
+		{
+			machine m;
+			setup_text(m);
+			m._state->RAM[0x0400] = 1;
+			m._state->RAM[0x2000 + 1 * 8 + 0] = 0x80;
+			m._state->RAM[0xD800] = 1;
+			m._state->RAM[0xD011] &= ~0x10; // DEN off
+			vic_render_scanline(m._state, 51);
+			const auto* fb = m.framebuffer();
+			tests.check(fb[BY * W + BX + 0] == vic_palette[14] && fb[BY * W + BX + 1] == vic_palette[14],
+				"VIC: DEN off blanks the display window to border colour");
+		}
+
+		// --- VIC bank comes from CIA2 port A through its data direction register ---
+		{
+			machine m;
+			setup_text(m);
+			m._state->RAM[0xDD00] = 0x00; // latch says bank 3, but every line is an input
+			m._state->RAM[0xDD02] = 0x00;
+			m._state->RAM[0x0400] = 1;
+			m._state->RAM[0x2000 + 1 * 8 + 0] = 0x80;
+			m._state->RAM[0xD800] = 1;
+			vic_render_scanline(m._state, 51);
+			const auto* fb = m.framebuffer();
+			tests.check(fb[BY * W + BX + 0] == vic_palette[1],
+				"VIC: undriven CIA2 port A lines float high, selecting bank 0");
 		}
 
 		// --- Sprite-to-background collision (foreground vs blank) ---
@@ -675,6 +712,46 @@ namespace
 		return (c >= 0x20 && c <= 0x5F) ? static_cast<char>(c) : '.';
 	}
 
+	void print_screen(const machine& c64)
+	{
+		const auto* screen = c64._state->RAM + text_video_mem_offset;
+		std::cout << "+" << std::string(40, '-') << "+\n";
+		for (int row = 0; row < 25; ++row)
+		{
+			std::cout << '|';
+			for (int col = 0; col < 40; ++col) std::cout << screen_char(screen[row * 40 + col]);
+			std::cout << "|\n";
+		}
+		std::cout << "+" << std::string(40, '-') << "+\n";
+	}
+
+	// Mount a disk image, boot, and LOAD a file from it through the kernal the way
+	// a user (or a game's loader) would, then print the resulting screen.
+	int run_disk(const std::filesystem::path& path, const std::string& name)
+	{
+		const auto bytes = read_file(path);
+		machine m;
+		if (!m.insert_disk(bytes.data(), bytes.size()))
+		{
+			std::cerr << "Not a recognised disk image: " << path.string() << '\n';
+			return 2;
+		}
+
+		if (!run_until_screen_contains(m, "READY.", boot_cycle_limit))
+		{
+			std::cerr << "Machine did not boot.\n";
+			return 1;
+		}
+
+		type_line(m, "LOAD\"" + name + "\",8,1");
+		for (int i = 0; i < 40; ++i) m.exec(execution_step);
+		type_line(m, "RUN");
+		for (int i = 0; i < 400; ++i) m.exec(50'000);
+
+		print_screen(m);
+		return 0;
+	}
+
 	// Run a raw binary as a bare 6502 program (e.g. Klaus Dormann's 6502
 	// functional test). Detects the success/failure infinite-loop trap.
 	int run_bin(const std::filesystem::path& path, const uint16_t load, const uint16_t start,
@@ -744,15 +821,7 @@ namespace
 		}
 		for (int i = 0; i < 400; ++i) m.exec(50'000); // ~20M cycles
 
-		const auto* screen = m._state->RAM + text_video_mem_offset;
-		std::cout << "+" << std::string(40, '-') << "+\n";
-		for (int row = 0; row < 25; ++row)
-		{
-			std::cout << '|';
-			for (int col = 0; col < 40; ++col) std::cout << screen_char(screen[row * 40 + col]);
-			std::cout << "|\n";
-		}
-		std::cout << "+" << std::string(40, '-') << "+\n";
+		print_screen(m);
 		return 0;
 	}
 
@@ -821,12 +890,18 @@ int main(const int argc, char** argv)
 	if (argc == 3 && std::string_view(argv[1]) == "--asm")
 		return run_asm(argv[2]);
 
+	// Mount a disk image and LOAD a file off it through the kernal, then print the
+	// screen: --run-disk <image> [name]
+	if ((argc == 3 || argc == 4) && std::string_view(argv[1]) == "--run-disk")
+		return run_disk(argv[2], argc == 4 ? argv[3] : "*");
+
 	if (argc != 1)
 	{
 		std::cerr << "Usage: lib8bit-tests\n"
 			<< "       lib8bit-tests --list-disk <image.d64|.d71|.d81>\n"
 			<< "       lib8bit-tests --run-bin <file> <loadHex> <startHex> [expectedTrapHex]\n"
 			<< "       lib8bit-tests --run-prg <file.prg>\n"
+			<< "       lib8bit-tests --run-disk <image.d64|.d71|.d81> [name]\n"
 			<< "       lib8bit-tests --asm <file.asm>\n";
 		return 2;
 	}
@@ -988,6 +1063,57 @@ int main(const int argc, char** argv)
 		}
 	}
 
+	// The PLA only shows cartridge ROM while the processor port asks for ROM, so a
+	// cartridge can reach the RAM underneath itself by writing $34 to $01.
+	{
+		const auto crt = read_file(fixture_folder / "pitfall.crt");
+		machine cart_machine;
+		if (cart_machine.load_crt(crt.data(), crt.size()))
+		{
+			const auto rom_byte = cart_machine._state->ram_read(0x8000);
+			cart_machine._state->ram_write(0x8000, static_cast<uint8_t>(rom_byte ^ 0xFF));
+			cart_machine._state->ram_write(0x0001, 0x34); // all RAM, no BASIC/KERNAL/ROML
+			const auto ram_byte = cart_machine._state->ram_read(0x8000);
+			cart_machine._state->ram_write(0x0001, 0x37);
+			tests.check(ram_byte == static_cast<uint8_t>(rom_byte ^ 0xFF),
+				"banking cartridge ROM out reveals the RAM underneath");
+			tests.check(cart_machine._state->ram_read(0x8000) == rom_byte,
+				"banking cartridge ROM back in restores it");
+		}
+	}
+
+	// An externally raised IRQ (machine::irq, the app's 50 Hz tick) is a source in
+	// its own right: recomputing the interrupt line must not discard it.
+	{
+		machine m;
+		m._state->cpu.clear_interrupt();
+		m.irq();
+		m._state->read_cia1(0xDC0D); // reading the ICR recomputes the IRQ line
+		tests.check(m._state->irq_pending, "an external IRQ survives a CIA register read");
+		m.exec(1);
+		tests.check(!m._state->ext_irq && (m._state->cpu.status & FLAG_INTERRUPT) != 0,
+			"an external IRQ is taken once and then released");
+	}
+
+	// The disassembler and the CPU share one length table; if they disagree, a
+	// listing that contains an undocumented opcode desynchronises from the code
+	// that actually runs.
+	{
+		bool all_match = true;
+		for (int op = 0; op < 256; ++op)
+		{
+			if (std::strcmp(opcodes[op].name, "UNDEFINED") != 0) continue;
+			if (opcodes[op].length == 0) continue; // JAM: the CPU deliberately spins
+			machine m;
+			m._state->raw_ram = true;
+			m._state->cpu.pc = 0x1000;
+			m._state->RAM[0x1000] = static_cast<uint8_t>(op);
+			m.exec(1);
+			if (m._state->cpu.pc != 0x1000 + opcodes[op].length) all_match = false;
+		}
+		tests.check(all_match, "undocumented opcodes advance the PC by their table length");
+	}
+
 	// SID audio: boot, program voice 1 with a gated sawtooth at full volume and
 	// confirm the SID pipeline renders non-silent 16-bit PCM.
 	{
@@ -1036,6 +1162,96 @@ int main(const int argc, char** argv)
 		tests.check(non_silent, "SID tune drives audible output");
 	}
 
+	// SID player front end: the tune's metadata and sub-tune list are painted on
+	// the emulated screen, the number keys switch sub-tune and X stops playback.
+	{
+		const auto tune_bytes = read_file(fixture_folder / "cybernoid.sid");
+		machine tune;
+		tune.load_sid(tune_bytes.data(), tune_bytes.size());
+		tune.exec(20'000);
+
+		const sid_player_state& player = tune._state->sid_player;
+		auto screen = [&] { return tune._state->RAM + player.screen_base; };
+
+		// Screen codes back to ASCII: letters are 1-26, and space through '?'
+		// share their ASCII values. Bit 7 is the reverse-video flag.
+		auto row_text = [&](int y)
+		{
+			std::string out;
+			for (int x = 0; x < 40; ++x)
+			{
+				const uint8_t code = screen()[y * 40 + x] & 0x7F;
+				if (code >= 1 && code <= 26) out += static_cast<char>('A' + code - 1);
+				else if (code >= 0x20 && code <= 0x3F) out += static_cast<char>(code);
+				else out += '.';
+			}
+			return out;
+		};
+		auto reversed = [&](int x, int y) { return (screen()[y * 40 + x] & 0x80) != 0; };
+
+		tests.check(row_text(1).find("SID PLAYER") != std::string::npos, "SID player draws its title");
+		tests.check(row_text(3).find("CYBERNOID") != std::string::npos, "SID player shows the tune name");
+		tests.check(row_text(4).find("JEROEN TEL") != std::string::npos, "SID player shows the author");
+		tests.check(player.songs == 2, "SID player reads the sub-tune count");
+		tests.check(reversed(11, 10) && !reversed(14, 10), "SID player highlights the playing track");
+
+		// "2" (matrix row 7, column 3) selects the second sub-tune.
+		tune.set_key(7, 3, true);
+		tune.exec(20'000);
+		tune.set_key(7, 3, false);
+		tune.exec(20'000);
+		tests.check(tune.sid_song() == 2, "a number key selects a sub-tune");
+		tests.check(reversed(14, 10) && !reversed(11, 10), "the highlight follows the selection");
+
+		// "X" (matrix row 2, column 7) stops the tune and leaves a bare machine.
+		tune.set_key(2, 7, true);
+		tune.exec(20'000);
+		tests.check(!tune.sid_player_active(), "X stops the SID player");
+	}
+
+	// Debug snapshot: every addressing mode formats the way a 6502 monitor
+	// prints it, and a capture of a running machine lines the disassembly window
+	// up on the PC without disturbing any I/O register.
+	{
+		struct { uint8_t bytes[3]; const char* text; } cases[] = {
+			{{0xEA, 0x00, 0x00}, "NOP"},
+			{{0x0A, 0x00, 0x00}, "ASL A"},
+			{{0xA9, 0x42, 0x00}, "LDA #$42"},
+			{{0xA5, 0xFB, 0x00}, "LDA $FB"},
+			{{0xB5, 0xFB, 0x00}, "LDA $FB,X"},
+			{{0xAD, 0x34, 0x12}, "LDA $1234"},
+			{{0xBD, 0x34, 0x12}, "LDA $1234,X"},
+			{{0xB9, 0x34, 0x12}, "LDA $1234,Y"},
+			{{0x6C, 0x14, 0x03}, "JMP ($0314)"},
+			{{0xA1, 0xFB, 0x00}, "LDA ($FB,X)"},
+			{{0xB1, 0xFB, 0x00}, "LDA ($FB),Y"},
+			{{0xD0, 0xFE, 0x00}, "BNE $1000"}, // relative, from $1000
+		};
+
+		bool all_match = true;
+		for (const auto& c : cases)
+		{
+			char text[20];
+			disassemble_6502(0x1000, c.bytes, text, sizeof(text));
+			if (std::strcmp(text, c.text) != 0) all_match = false;
+		}
+		tests.check(all_match, "disassembles every addressing mode");
+
+		machine booted_debug;
+		booted_debug.exec(3'000'000);
+		const uint8_t before = booted_debug._state->cia1.icr_data;
+
+		debug_state snapshot;
+		booted_debug.capture_debug(snapshot);
+
+		tests.check(snapshot.pc == booted_debug._state->cpu.pc, "debug snapshot reports the PC");
+		tests.check(snapshot.disasm_count == DEBUG_DISASM_LINES &&
+			snapshot.disasm[snapshot.current].address == snapshot.pc,
+			"disassembly window lands on the PC");
+		tests.check(booted_debug._state->cia1.icr_data == before,
+			"debug snapshot leaves latched I/O untouched");
+	}
+
 	disk_directory disk;
 	const auto listed = list_disk(fixture_folder / "1942.d64", &disk);
 	tests.check(listed, "lists 1942.d64 directory");
@@ -1055,6 +1271,118 @@ int main(const int argc, char** argv)
 		std::vector<uint8_t> by_name;
 		read_disk_file(d64.data(), d64.size(), "1942*", by_name);
 		tests.check(!by_name.empty() && by_name == first, "extracts disk file by name pattern");
+
+		// CBM DOS wildcards: '?' matches one character, '*' the rest of the name.
+		std::vector<uint8_t> by_glob;
+		read_disk_file(d64.data(), d64.size(), "19?2 D*", by_glob);
+		tests.check(!by_glob.empty() && by_glob != first, "matches a ? wildcard mid-pattern");
+		tests.check(disk.free_blocks > 0 && disk.free_blocks < 664, "counts free blocks from the BAM");
+	}
+
+	// --- Device 8: a mounted image services the kernal LOAD routine ----------
+	// This is what makes a disk-based game work: its loader keeps LOADing files
+	// long after the first program started.
+	{
+		const auto d64 = read_file(fixture_folder / "1942.d64");
+
+		machine drive;
+		tests.check(drive.insert_disk(d64.data(), d64.size()), "inserts a disk image into device 8");
+		tests.check(drive.has_disk(), "reports the drive as loaded");
+		tests.check(!drive.insert_disk(prg.data(), prg.size()), "rejects a non-disk image");
+		drive.eject_disk();
+		tests.check(!drive.has_disk(), "reports the drive as empty after eject");
+	}
+
+	// A machine-code routine calling SETNAM/SETLFS/LOAD must get the documented
+	// results back: carry clear, X/Y = end address + 1, and the file in RAM.
+	{
+		const auto d64 = read_file(fixture_folder / "1942.d64");
+		std::vector<uint8_t> expected;
+		read_disk_file(d64.data(), d64.size(), "1942 D*", expected);
+
+		machine drive;
+		drive.insert_disk(d64.data(), d64.size());
+		tests.check(run_until_screen_contains(drive, "READY.", boot_cycle_limit), "boots with a disk inserted");
+
+		constexpr std::string_view name = "1942 D*";
+		for (size_t i = 0; i < name.size(); ++i)
+			drive._state->RAM[0xC100 + i] = static_cast<uint8_t>(name[i]);
+
+		const uint8_t routine[] = {
+			0xA9, static_cast<uint8_t>(name.size()), // LDA #len
+			0xA2, 0x00, 0xA0, 0xC1,                  // LDX/LDY = $C100
+			0x20, 0xBD, 0xFF,                        // JSR SETNAM
+			0xA9, 0x01, 0xA2, 0x08, 0xA0, 0x01,      // file 1, device 8, secondary 1
+			0x20, 0xBA, 0xFF,                        // JSR SETLFS
+			0xA9, 0x00,                              // LDA #0 (load, not verify)
+			0x20, 0xD5, 0xFF,                        // JSR LOAD
+			0x08,                                    // PHP
+			0x86, 0xFB, 0x84, 0xFC,                  // STX $FB / STY $FC (end address)
+			0x68, 0x85, 0xFD,                        // PLA / STA $FD (status flags)
+			0x60,                                    // RTS
+		};
+		std::copy(std::begin(routine), std::end(routine), drive._state->RAM + 0xC000);
+
+		type_line(drive, "SYS 49152");
+		drive.exec(command_cycle_limit);
+
+		const auto load_addr = static_cast<uint16_t>(expected[0] | expected[1] << 8);
+		const auto end = static_cast<uint16_t>(drive._state->RAM[0xFB] | drive._state->RAM[0xFC] << 8);
+		tests.check(expected.size() > 2, "reads the file the routine asks for");
+		tests.check((drive._state->RAM[0xFD] & FLAG_CARRY) == 0, "kernal LOAD reports success");
+		tests.check(end == static_cast<uint16_t>(load_addr + expected.size() - 2),
+			"kernal LOAD returns the end address in X/Y");
+		tests.check(std::equal(expected.begin() + 2, expected.end(), drive._state->RAM + load_addr),
+			"kernal LOAD copies the file into RAM");
+	}
+
+	// LOAD"$",8 must produce a listable BASIC program, and a missing file must
+	// still come back through the kernal's error path.
+	{
+		const auto d64 = read_file(fixture_folder / "1942.d64");
+
+		machine dir;
+		dir.insert_disk(d64.data(), d64.size());
+		run_until_screen_contains(dir, "READY.", boot_cycle_limit);
+		type_line(dir, "LOAD\"$\",8");
+		dir.exec(command_cycle_limit);
+		type_line(dir, "LIST");
+		tests.check(run_until_screen_contains(dir, "1986 ELITE", command_cycle_limit),
+			"LOAD\"$\",8 lists the disk directory");
+		tests.check(screen_contains(dir, "BLOCKS FREE"), "directory listing ends with the free block count");
+
+		machine missing;
+		missing.insert_disk(d64.data(), d64.size());
+		run_until_screen_contains(missing, "READY.", boot_cycle_limit);
+		type_line(missing, "LOAD\"NOSUCHFILE\",8");
+		tests.check(run_until_screen_contains(missing, "FILE NOT FOUND", command_cycle_limit),
+			"a missing file reports FILE NOT FOUND");
+	}
+
+	// A relocating load (no ",1") is the common BASIC case: the kernal must hand
+	// back an end address that BASIC stores as its start-of-variables pointer,
+	// and a request for a device we do not model must fall through to the ROM.
+	{
+		const auto d64 = read_file(fixture_folder / "1942.d64");
+		std::vector<uint8_t> expected;
+		read_disk_file(d64.data(), d64.size(), "1942 D*", expected);
+
+		machine basic_load;
+		basic_load.insert_disk(d64.data(), d64.size());
+		run_until_screen_contains(basic_load, "READY.", boot_cycle_limit);
+		type_line(basic_load, "LOAD\"1942 D*\",8");
+		basic_load.exec(command_cycle_limit);
+
+		const auto end = static_cast<uint16_t>(0x0801 + expected.size() - 2);
+		const auto vars = static_cast<uint16_t>(basic_load._state->RAM[0x2D] | basic_load._state->RAM[0x2E] << 8);
+		tests.check(vars == end, "a relocating load leaves BASIC's start-of-variables at the end address");
+
+		machine other_device;
+		other_device.insert_disk(d64.data(), d64.size());
+		run_until_screen_contains(other_device, "READY.", boot_cycle_limit);
+		type_line(other_device, "LOAD\"1942 D*\",9");
+		tests.check(run_until_screen_contains(other_device, "DEVICE NOT PRESENT", command_cycle_limit),
+			"a load from a device we do not model falls through to the ROM");
 	}
 
 	if (tests.failures != 0)

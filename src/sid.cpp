@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 
 // ===========================================================================
@@ -16,7 +17,6 @@ namespace
 {
 	int16_t g_wftable[4][4096];
 	int16_t g_pulldown[2][5][4096];
-	bool g_tables_built = false;
 
 	struct wave_config
 	{
@@ -28,7 +28,8 @@ namespace
 		double distance2;
 	};
 
-	// Monte-Carlo derived combined-waveform parameters (AVERAGE), [model][waveform].
+	// Monte-Carlo derived combined-waveform parameters (AVERAGE), [model][waveform],
+	// waveform order: TS ($3), PT ($5), PS ($6), PTS ($7), NP ($C).
 	const wave_config CONFIG_AVERAGE[2][5] = {
 		{
 			{0, 0.877322257, 1.11349654, 0, 2.14537621, 9.08618164},
@@ -91,57 +92,77 @@ namespace
 		}
 		return value;
 	}
+
+	void build_tables()
+	{
+		for (int idx = 0; idx < 4096; idx++)
+		{
+			const int saw = idx;
+			g_wftable[0][idx] = static_cast<int16_t>(0xFFF);
+			g_wftable[1][idx] = static_cast<int16_t>(tri_xor(idx));
+			g_wftable[2][idx] = static_cast<int16_t>(saw);
+			g_wftable[3][idx] = static_cast<int16_t>(saw & (saw << 1));
+		}
+
+		for (int model = 0; model < 2; model++)
+		{
+			for (int wf = 0; wf < 5; wf++)
+			{
+				const wave_config& cfg = CONFIG_AVERAGE[model][wf];
+				double distance_table[25];
+				for (int i = 0; i < 25; i++)
+				{
+					const double dist = i < 12 ? cfg.distance1 : cfg.distance2;
+					distance_table[i] = dist_func(cfg.dist_func, dist, std::abs(i - 12));
+				}
+				for (int idx = 0; idx < 4096; idx++)
+				{
+					g_pulldown[model][wf][idx] = static_cast<int16_t>(
+						calculate_pulldown(distance_table, cfg.topbit, cfg.pulsestrength, cfg.threshold, idx));
+				}
+			}
+		}
+	}
 }
 
 void sid_init_tables()
 {
-	if (g_tables_built) return;
-	g_tables_built = true;
-
-	for (int idx = 0; idx < 4096; idx++)
-	{
-		const int saw = idx;
-		g_wftable[0][idx] = static_cast<int16_t>(0xFFF);
-		g_wftable[1][idx] = static_cast<int16_t>(tri_xor(idx));
-		g_wftable[2][idx] = static_cast<int16_t>(saw);
-		g_wftable[3][idx] = static_cast<int16_t>(saw & (saw << 1));
-	}
-
-	for (int model = 0; model < 2; model++)
-	{
-		for (int wf = 0; wf < 5; wf++)
-		{
-			const wave_config& cfg = CONFIG_AVERAGE[model][wf];
-			double distance_table[25];
-			for (int i = 0; i < 25; i++)
-			{
-				const double dist = i < 12 ? cfg.distance1 : cfg.distance2;
-				distance_table[i] = dist_func(cfg.dist_func, dist, std::abs(i - 12));
-			}
-			for (int idx = 0; idx < 4096; idx++)
-			{
-				g_pulldown[model][wf][idx] = static_cast<int16_t>(
-					calculate_pulldown(distance_table, cfg.topbit, cfg.pulsestrength, cfg.threshold, idx));
-			}
-		}
-	}
+	static const bool built = [] { build_tables(); return true; }();
+	(void)built;
 }
 
 // ===========================================================================
 // Waveform generator
 // ===========================================================================
 
+namespace
+{
+	// The five pulldown models cover the combined waveforms TS, PT, PS, PTS and NP.
+	const int16_t* select_pulldown(const int16_t (*models)[4096], int waveform)
+	{
+		if (!models) return nullptr;
+		switch (waveform)
+		{
+		case 0x3: return models[0];
+		case 0x5: return models[1];
+		case 0x6: return models[2];
+		case 0x7: return models[3];
+		case 0xC: return models[4];
+		default: return nullptr;
+		}
+	}
+}
+
 void waveform_generator::set_waveform_models(const int16_t (*models)[4096])
 {
 	model_wave = models;
-	if (waveform < 4) wave = models[waveform];
+	wave = models ? models[waveform & 3] : nullptr;
 }
 
 void waveform_generator::set_pulldown_models(const int16_t (*models)[4096])
 {
 	model_pulldown = models;
-	if (models && waveform >= 3 && waveform < 8) pulldown = models[waveform - 3];
-	else pulldown = nullptr;
+	pulldown = select_pulldown(models, waveform);
 }
 
 void waveform_generator::reset()
@@ -223,8 +244,7 @@ uint16_t waveform_generator::output()
 
 		if (pulldown)
 		{
-			const uint16_t pd = static_cast<uint16_t>(pulldown[waveform_output]);
-			waveform_output = pd ? pd : waveform_output;
+			waveform_output = static_cast<uint16_t>(pulldown[waveform_output]);
 		}
 
 		if ((waveform & 3) && !is6581)
@@ -232,8 +252,7 @@ uint16_t waveform_generator::output()
 			osc3 = static_cast<uint16_t>(tri_saw_pipeline & (no_pulse | pulse_output) & no_noise_or_noise_output);
 			if (pulldown)
 			{
-				const uint16_t pd = static_cast<uint16_t>(pulldown[osc3]);
-				osc3 = pd ? pd : osc3;
+				osc3 = static_cast<uint16_t>(pulldown[osc3]);
 			}
 			tri_saw_pipeline = static_cast<uint16_t>(wave ? wave[ix] : 0);
 		}
@@ -304,17 +323,8 @@ void waveform_generator::write_control(uint8_t control)
 	const int waveform_new = (control >> 4) & 0x0F;
 	waveform = waveform_new;
 
-	if (model_wave && waveform_new < 4) wave = model_wave[waveform_new];
-
-	if (model_pulldown && waveform_new >= 3)
-	{
-		const int idx = waveform_new - 3;
-		pulldown = idx < 5 ? model_pulldown[idx] : nullptr;
-	}
-	else
-	{
-		pulldown = nullptr;
-	}
+	if (model_wave) wave = model_wave[waveform_new & 3];
+	pulldown = select_pulldown(model_pulldown, waveform_new);
 
 	ring_msb_mask = (control & 0x04) ? 0x800000 : 0;
 	sync = (control & 0x02) != 0;
@@ -525,25 +535,48 @@ void envelope_generator::write_sustain_release(uint8_t v)
 // Filters
 // ===========================================================================
 
-namespace { constexpr int MAX_FILTER_STATE = 0x7FFFFF; }
-
-sid_filter::sid_filter(bool is_6581) : is6581(is_6581)
+namespace
 {
-	constexpr double filter_curve = 0.5;
-	for (int i = 0; i < 2048; i++)
+	constexpr int MAX_FILTER_STATE = 0x7FFFFF;
+
+	// Model constants, built once and shared by every sid_filter instance.
+	struct filter_freq_tables
 	{
-		const double fc_n = i / 2048.0;
-		if (is6581)
+		float t6581[2048];
+		float t8580[2048];
+
+		filter_freq_tables()
 		{
-			const double x = fc_n * (1 + filter_curve * 0.5);
-			freq_table[i] = static_cast<float>(std::pow(x, 1.0 + filter_curve) * 0.04);
+			constexpr double filter_curve = 0.5;
+			for (int i = 0; i < 2048; i++)
+			{
+				const double fc_n = i / 2048.0;
+				const double x = fc_n * (1 + filter_curve * 0.5);
+				t6581[i] = static_cast<float>(std::pow(x, 1.0 + filter_curve) * 0.04);
+				t8580[i] = static_cast<float>(0.002 + fc_n * 0.045);
+			}
 		}
-		else
-		{
-			freq_table[i] = static_cast<float>(0.002 + fc_n * 0.045);
-		}
+	};
+
+	const filter_freq_tables& freq_tables()
+	{
+		static const filter_freq_tables tables;
+		return tables;
 	}
+}
+
+sid_filter::sid_filter(bool is_6581)
+{
+	set_model(is_6581);
 	reset();
+}
+
+void sid_filter::set_model(bool is_6581)
+{
+	is6581 = is_6581;
+	freq_table = is_6581 ? freq_tables().t6581 : freq_tables().t8580;
+	update_w0();
+	update_digi_dc();
 }
 
 void sid_filter::reset()
@@ -575,6 +608,7 @@ void sid_filter::write_mode_vol(uint8_t v)
 	bp = (v & 0x20) != 0;
 	hp = (v & 0x40) != 0;
 	voice3off = (v & 0x80) != 0;
+	update_digi_dc();
 }
 
 void sid_filter::enable(bool e)
@@ -630,9 +664,8 @@ int sid_filter::mix_output(int vo)
 	if (bp) vo += vbp;
 	if (hp) vo += vhp;
 
-	const int output = (vo * vol) >> 4;
-	const int digi_dc = static_cast<int>((vol - 7.5) * 1024);
-	return std::clamp(output + digi_dc, -32768, 32767);
+	// Unclipped: the single clip point is applied after the output gain.
+	return ((vo * vol) >> 4) + digi_dc;
 }
 
 int sid_filter::clock(voice& v1, voice& v2, voice& v3)
@@ -666,7 +699,7 @@ int external_filter::clock(int input)
 // ===========================================================================
 
 sid_chip::sid_chip()
-	: filter6581(true), filter8580(false), filter(&filter8580)
+	: filter(false)
 {
 	sid_init_tables();
 
@@ -681,11 +714,12 @@ sid_chip::sid_chip()
 
 void sid_chip::set_chip_model(sid_model m)
 {
-	if (m == sid_model::mos6581) { filter = &filter6581; scale_factor = 0.3; model_ttl = 0x01D00; }
-	else { filter = &filter8580; scale_factor = 0.4; model_ttl = 0xA2000; }
-	model = m;
-
 	const bool is6581 = m == sid_model::mos6581;
+	if (is6581) { scale_factor = 0.15; model_ttl = 0x01D00; }
+	else { scale_factor = 0.20; model_ttl = 0xA2000; }
+	model = m;
+	filter.set_model(is6581);
+
 	const int model_idx = is6581 ? 0 : 1;
 	for (auto& v : voices)
 	{
@@ -708,13 +742,11 @@ void sid_chip::set_sampling_parameters(double clk, double samp)
 void sid_chip::reset()
 {
 	for (auto& v : voices) v.reset();
-	filter6581.reset();
-	filter8580.reset();
+	filter.reset();
 	ext_filter.reset();
 	bus_value = 0;
 	bus_value_ttl = 0;
 	write_queue.clear();
-	write_queue_index = 0;
 	dc_offset = 0;
 	std::memset(fir_buffer, 0, sizeof(fir_buffer));
 	fir_index = 0;
@@ -748,6 +780,11 @@ uint8_t sid_chip::read(uint16_t offset)
 
 void sid_chip::write(uint16_t offset, uint8_t value, int64_t cycle)
 {
+	// Bound the queue in case a host enables audio but never drains it.
+	constexpr size_t max_queued = 1 << 16;
+	if (write_queue.size() >= max_queued)
+		write_queue.erase(write_queue.begin(), write_queue.begin() + static_cast<std::ptrdiff_t>(max_queued / 2));
+
 	write_queue.push_back({static_cast<uint8_t>(offset & 0x1F), value, cycle});
 }
 
@@ -779,10 +816,10 @@ void sid_chip::apply_register_write(uint8_t offset, uint8_t value)
 	case 0x12: voices[2].write_control(value); break;
 	case 0x13: voices[2].envelope.write_attack_decay(value); break;
 	case 0x14: voices[2].envelope.write_sustain_release(value); break;
-	case 0x15: filter6581.write_fc_lo(value); filter8580.write_fc_lo(value); break;
-	case 0x16: filter6581.write_fc_hi(value); filter8580.write_fc_hi(value); break;
-	case 0x17: filter6581.write_res_filt(value); filter8580.write_res_filt(value); break;
-	case 0x18: filter6581.write_mode_vol(value); filter8580.write_mode_vol(value); break;
+	case 0x15: filter.write_fc_lo(value); break;
+	case 0x16: filter.write_fc_hi(value); break;
+	case 0x17: filter.write_res_filt(value); break;
+	case 0x18: filter.write_mode_vol(value); break;
 	default: break;
 	}
 	voice_sync(false);
@@ -813,13 +850,6 @@ void sid_chip::voice_sync(bool sync)
 	}
 }
 
-void sid_chip::begin_frame()
-{
-	write_queue_index = 0;
-	std::stable_sort(write_queue.begin(), write_queue.end(),
-		[](const queued_write& a, const queued_write& b) { return a.cycle < b.cycle; });
-}
-
 void sid_chip::init_fir_filter(double clk, double samp)
 {
 	const double oversample = clk / samp;
@@ -846,17 +876,19 @@ void sid_chip::init_fir_filter(double clk, double samp)
 
 bool sid_chip::resampler_input(double sample)
 {
+	static_assert((FIR_LEN & (FIR_LEN - 1)) == 0, "FIR_LEN must be a power of two");
+
 	fir_buffer[fir_index] = static_cast<float>(sample);
-	fir_index = (fir_index + 1) % FIR_LEN;
+	fir_index = (fir_index + 1) & (FIR_LEN - 1);
 
 	bool ready = false;
 	if (sample_offset < 1024)
 	{
-		double filtered = 0;
+		float filtered = 0;
 		int buf_idx = fir_index;
 		for (int i = 0; i < FIR_LEN; i++)
 		{
-			buf_idx = (buf_idx - 1 + FIR_LEN) % FIR_LEN;
+			buf_idx = (buf_idx - 1) & (FIR_LEN - 1);
 			filtered += fir_buffer[buf_idx] * fir_coeffs[i];
 		}
 		output_value = filtered;
@@ -869,11 +901,10 @@ bool sid_chip::resampler_input(double sample)
 
 int sid_chip::resampler_output()
 {
-	int sample = static_cast<int>(output_value * scale_factor);
-	sample = std::clamp(sample, -32768, 32767);
-	const double dc_filtered = sample - dc_offset;
+	const double scaled = output_value * scale_factor;
+	const double dc_filtered = scaled - dc_offset;
 	dc_offset += dc_filtered * 0.005;
-	return std::clamp(static_cast<int>(dc_filtered), -32768, 32767);
+	return static_cast<int>(std::clamp(dc_filtered, -32768.0, 32767.0));
 }
 
 int sid_chip::clock(int cycles, int16_t* buf, int64_t start_cycle, int max_samples)
@@ -882,18 +913,19 @@ int sid_chip::clock(int cycles, int16_t* buf, int64_t start_cycle, int max_sampl
 	int s = 0;
 	const int64_t end_cycle = start_cycle + cycles;
 	int64_t current_cycle = start_cycle;
+	size_t queue_index = 0;
 
 	while (current_cycle < end_cycle)
 	{
-		while (write_queue_index < write_queue.size() && write_queue[write_queue_index].cycle <= current_cycle)
+		while (queue_index < write_queue.size() && write_queue[queue_index].cycle <= current_cycle)
 		{
-			const queued_write& cmd = write_queue[write_queue_index++];
+			const queued_write& cmd = write_queue[queue_index++];
 			apply_register_write(cmd.offset, cmd.value);
 		}
 
 		int64_t next_event = end_cycle;
-		if (write_queue_index < write_queue.size())
-			next_event = std::min(next_event, write_queue[write_queue_index].cycle);
+		if (queue_index < write_queue.size())
+			next_event = std::min(next_event, write_queue[queue_index].cycle);
 
 		const int64_t to_run = std::min(next_event - current_cycle, next_voice_sync);
 		if (to_run <= 0) { current_cycle++; continue; }
@@ -907,7 +939,7 @@ int sid_chip::clock(int cycles, int16_t* buf, int64_t start_cycle, int max_sampl
 			voices[1].envelope.clock();
 			voices[2].envelope.clock();
 
-			const int sid_output = filter->clock(voices[0], voices[1], voices[2]);
+			const int sid_output = filter.clock(voices[0], voices[1], voices[2]);
 			const int c64_output = ext_filter.clock(sid_output);
 
 			if (resampler_input(c64_output))
@@ -922,11 +954,7 @@ int sid_chip::clock(int cycles, int16_t* buf, int64_t start_cycle, int max_sampl
 		if (next_voice_sync <= 0) voice_sync(true);
 	}
 
-	if (write_queue_index >= write_queue.size())
-	{
-		write_queue.clear();
-		write_queue_index = 0;
-	}
+	write_queue.erase(write_queue.begin(), write_queue.begin() + static_cast<std::ptrdiff_t>(queue_index));
 
 	return s;
 }

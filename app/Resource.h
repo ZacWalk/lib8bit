@@ -1,32 +1,8 @@
 //{{NO_DEPENDENCIES}}
-// Microsoft Visual C++ generated include file.
-// Used by c64.rc
 //
 // lib8bit by Zac Walker
 //
-// Resource identifiers for the Win32 test app (icon, menus, dialogs, strings).
+// Resource identifiers for the Win32 app. The menu, accelerators, About box and
+// all UI strings are built in code (app.cpp), so the icon is the only resource.
 
-#define IDS_APP_TITLE			103
-
-#define IDR_MAINFRAME			128
-#define IDD_C64_DIALOG	102
-#define IDD_ABOUTBOX			103
-#define IDM_ABOUT				104
-#define IDM_EXIT				105
 #define IDI_C64			107
-#define IDC_C64			109
-#ifndef IDC_STATIC
-#define IDC_STATIC				-1
-#endif
-// Next default values for new objects
-//
-#ifdef APSTUDIO_INVOKED
-#ifndef APSTUDIO_READONLY_SYMBOLS
-
-#define _APS_NO_MFC					130
-#define _APS_NEXT_RESOURCE_VALUE	129
-#define _APS_NEXT_COMMAND_VALUE		32771
-#define _APS_NEXT_CONTROL_VALUE		1000
-#define _APS_NEXT_SYMED_VALUE		111
-#endif
-#endif

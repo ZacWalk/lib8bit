@@ -8,7 +8,7 @@
 struct opcode
 {
 	const char* byte;            // hex string (informational)
-	int length;                  // instruction length in bytes (1-3)
+	int length;                  // instruction length in bytes; 0 marks a JAM/KIL
 	const char* name;            // mnemonic, e.g. "LDA" ("UNDEFINED" for illegals)
 	const char* addressing_mode; // e.g. "$absolute,X", "#immediate", "relative"
 };

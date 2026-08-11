@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <cstdlib>
 #include <string>
 #include <unordered_map>
@@ -59,7 +60,8 @@ namespace
 				if (name == "UNDEFINED") continue;
 				const int m = mode_index(opcodes[b].addressing_mode);
 				if (m < 0) continue;
-				t[name].op[m] = b;
+				int& slot = t[name].op[m];
+				if (slot < 0) slot = b; // documented encoding wins over an undocumented alias
 			}
 			return t;
 		}();
@@ -100,10 +102,14 @@ namespace
 		for (size_t i = 0; i < s.size(); ++i)
 		{
 			if (s[i] == '"') in_quote = !in_quote;
+			else if (!in_quote && s[i] == '\'' && i + 2 < s.size() && s[i + 2] == '\'') i += 2; // 'c' literal
 			else if (s[i] == ';' && !in_quote) return s.substr(0, i);
 		}
 		return s;
 	}
+
+	// A 6502 address space is 64K, so no source file can legitimately emit more.
+	constexpr size_t max_output = 0x10000;
 
 	struct asm_ctx
 	{
@@ -111,6 +117,8 @@ namespace
 		assembler_result r;
 		uint16_t addr = 0xC000;
 		uint16_t origin = 0xC000;
+		size_t emitted = 0;
+		bool wrapped = false;
 		bool started = false;
 		bool final = false;
 		int line = 0;
@@ -123,13 +131,33 @@ namespace
 			return false;
 		}
 
-		void emit(uint8_t b)
+		bool emit(uint8_t b)
 		{
+			if (wrapped) return fail("address wrapped past $FFFF");
+			if (emitted >= max_output) return fail("program exceeds 64K of output");
 			if (final) r.bytes.push_back(b);
 			if (!started) { origin = addr; started = true; }
+			++emitted;
+			if (addr == 0xFFFF) wrapped = true;
 			addr = static_cast<uint16_t>(addr + 1);
+			return true;
 		}
 	};
+
+	// Parse a whole numeric token in the given base. The token must be consumed
+	// entirely, so "$1G" or "12abc" are errors rather than silent truncations.
+	bool parse_number(const std::string& t, const size_t offset, const int base, int& out)
+	{
+		const char* first = t.c_str() + offset;
+		const char* last = t.c_str() + t.size();
+		if (first >= last) return false;
+		unsigned long value = 0;
+		const auto res = std::from_chars(first, last, value, base);
+		if (res.ec != std::errc{} || res.ptr != last) return false;
+		if (value > 0xFFFF) return false;
+		out = static_cast<int>(value);
+		return true;
+	}
 
 	int parse_term(asm_ctx& c, std::string t, bool& ok, bool& symbolic)
 	{
@@ -138,10 +166,21 @@ namespace
 		if (t == "*") { symbolic = true; return c.addr; }
 
 		const char f = t[0];
-		if (f == '$') return static_cast<int>(std::strtol(t.c_str() + 1, nullptr, 16));
-		if (f == '%') return static_cast<int>(std::strtol(t.c_str() + 1, nullptr, 2));
-		if (f == '\'') { if (t.size() >= 2) return static_cast<unsigned char>(t[1]); ok = false; return 0; }
-		if (std::isdigit(static_cast<unsigned char>(f))) return static_cast<int>(std::strtol(t.c_str(), nullptr, 10));
+		int value = 0;
+		if (f == '$') { if (!parse_number(t, 1, 16, value)) ok = false; return value; }
+		if (f == '%') { if (!parse_number(t, 1, 2, value)) ok = false; return value; }
+		if (f == '\'')
+		{
+			// 'c' or the unterminated 'c form.
+			if (t.size() == 2 || (t.size() == 3 && t[2] == '\'')) return static_cast<unsigned char>(t[1]);
+			ok = false;
+			return 0;
+		}
+		if (std::isdigit(static_cast<unsigned char>(f)))
+		{
+			if (!parse_number(t, 0, 10, value)) ok = false;
+			return value;
+		}
 
 		// Symbol / equate reference.
 		symbolic = true;
@@ -160,23 +199,30 @@ namespace
 
 		char hilo = 0;
 		if (e[0] == '<' || e[0] == '>') { hilo = e[0]; e = e.substr(1); trim(e); }
+		if (e.empty()) { ok = false; return 0; }
 
-		size_t op_pos = std::string::npos;
-		for (size_t i = 1; i < e.size(); ++i)
-			if (e[i] == '+' || e[i] == '-') { op_pos = i; break; }
+		// Left-to-right chain of +/- separated terms. A sign in the leading position
+		// belongs to the term itself, and 'c' literals are skipped over.
+		int value = 0;
+		char pending = '+';
+		size_t start = 0;
+		for (size_t i = 0;; ++i)
+		{
+			if (i < e.size() && e[i] == '\'')
+			{
+				i += (i + 2 < e.size() && e[i + 2] == '\'') ? 2 : 1;
+				continue;
+			}
+			const bool at_end = i >= e.size();
+			if (!at_end && !((e[i] == '+' || e[i] == '-') && i > start)) continue;
 
-		int value;
-		if (op_pos == std::string::npos)
-		{
-			value = parse_term(c, e, ok, symbolic);
-		}
-		else
-		{
-			bool ok2 = true;
-			const int base = parse_term(c, e.substr(0, op_pos), ok, symbolic);
-			const int off = parse_term(c, e.substr(op_pos + 1), ok2, symbolic);
-			if (!ok2) ok = false;
-			value = e[op_pos] == '+' ? base + off : base - off;
+			bool term_ok = true;
+			const int term = parse_term(c, e.substr(start, i - start), term_ok, symbolic);
+			if (!term_ok) ok = false;
+			value = pending == '+' ? value + term : value - term;
+			if (at_end) break;
+			pending = e[i];
+			start = i + 1;
 		}
 
 		if (hilo == '<') value &= 0xFF;
@@ -195,12 +241,12 @@ namespace
 		if (o[0] == '#') return {opclass::imm, o.substr(1)};
 		if (o[0] == '(')
 		{
-			if (iends(o, ",X)")) return {opclass::indx, o.substr(1, o.size() - 4)};
-			if (iends(o, "),Y")) return {opclass::indy, o.substr(1, o.size() - 4)};
-			if (o.back() == ')') return {opclass::ind, o.substr(1, o.size() - 2)};
+			if (o.size() >= 4 && iends(o, ",X)")) return {opclass::indx, o.substr(1, o.size() - 4)};
+			if (o.size() >= 4 && iends(o, "),Y")) return {opclass::indy, o.substr(1, o.size() - 4)};
+			if (o.size() >= 2 && o.back() == ')') return {opclass::ind, o.substr(1, o.size() - 2)};
 		}
-		if (iends(o, ",X")) return {opclass::idxx, o.substr(0, o.size() - 2)};
-		if (iends(o, ",Y")) return {opclass::idxy, o.substr(0, o.size() - 2)};
+		if (o.size() >= 3 && iends(o, ",X")) return {opclass::idxx, o.substr(0, o.size() - 2)};
+		if (o.size() >= 3 && iends(o, ",Y")) return {opclass::idxy, o.substr(0, o.size() - 2)};
 		return {opclass::direct, o};
 	}
 
@@ -252,10 +298,13 @@ namespace
 		if (!ok) return c.fail("bad expression in operand");
 		if (mode < 0 || !has(mode)) return c.fail(m + " has no matching addressing mode");
 
-		c.emit(static_cast<uint8_t>(ops.op[mode]));
+		if (!c.emit(static_cast<uint8_t>(ops.op[mode]))) return false;
 		switch (mode)
 		{
 		case AM_IMP:
+			// BRK is two bytes: the 6502 pushes PC+2, so the byte after $00 is skipped.
+			if (m == "BRK" && !c.emit(0)) return false;
+			break;
 		case AM_ACC:
 			break;
 		case AM_IMM:
@@ -264,21 +313,21 @@ namespace
 		case AM_ZPY:
 		case AM_INDX:
 		case AM_INDY:
-			c.emit(static_cast<uint8_t>(value & 0xFF));
+			if (!c.emit(static_cast<uint8_t>(value & 0xFF))) return false;
 			break;
 		case AM_ABS:
 		case AM_ABSX:
 		case AM_ABSY:
 		case AM_IND:
-			c.emit(static_cast<uint8_t>(value & 0xFF));
-			c.emit(static_cast<uint8_t>((value >> 8) & 0xFF));
+			if (!c.emit(static_cast<uint8_t>(value & 0xFF))) return false;
+			if (!c.emit(static_cast<uint8_t>((value >> 8) & 0xFF))) return false;
 			break;
 		case AM_REL:
 		{
 			const int next = c.addr + 1; // address of the following instruction
 			const int off = value - next;
 			if (c.final && (off < -128 || off > 127)) return c.fail("branch target out of range");
-			c.emit(static_cast<uint8_t>(off & 0xFF));
+			if (!c.emit(static_cast<uint8_t>(off & 0xFF))) return false;
 			break;
 		}
 		default:
@@ -292,7 +341,10 @@ namespace
 		const auto n = static_cast<uint16_t>(v & 0xFFFF);
 		if (!c.started) { c.addr = n; return true; }
 		if (n < c.addr) return c.fail(".org moves backwards");
-		while (c.addr < n) c.emit(0); // zero-fill the gap
+		while (c.addr < n)
+		{
+			if (!c.emit(0)) return false; // zero-fill the gap
+		}
 		return true;
 	}
 
@@ -309,8 +361,8 @@ namespace
 				bool ok = true, symbolic = false;
 				const int v = parse_expr(c, tok, ok, symbolic);
 				if (!ok) return c.fail("bad value in data directive");
-				c.emit(static_cast<uint8_t>(v & 0xFF));
-				if (word) c.emit(static_cast<uint8_t>((v >> 8) & 0xFF));
+				if (!c.emit(static_cast<uint8_t>(v & 0xFF))) return false;
+				if (word && !c.emit(static_cast<uint8_t>((v >> 8) & 0xFF))) return false;
 			}
 			if (comma == std::string::npos) break;
 			start = comma + 1;
@@ -323,7 +375,8 @@ namespace
 		trim(rest);
 		if (rest.size() < 2 || rest.front() != '"' || rest.back() != '"')
 			return c.fail(".text expects a quoted string");
-		for (size_t i = 1; i + 1 < rest.size(); ++i) c.emit(static_cast<uint8_t>(rest[i]));
+		for (size_t i = 1; i + 1 < rest.size(); ++i)
+			if (!c.emit(static_cast<uint8_t>(rest[i]))) return false;
 		return true;
 	}
 
@@ -361,6 +414,8 @@ namespace
 	{
 		c.addr = 0xC000;
 		c.origin = 0xC000;
+		c.emitted = 0;
+		c.wrapped = false;
 		c.started = false;
 		c.final = final;
 
@@ -377,7 +432,12 @@ namespace
 				while (p < s.size() && (std::isalnum(static_cast<unsigned char>(s[p])) || s[p] == '_')) ++p;
 				if (p > 0 && p < s.size() && s[p] == ':')
 				{
-					if (!final) c.symbols[to_upper(s.substr(0, p))] = c.addr;
+					const std::string name = to_upper(s.substr(0, p));
+					if (!final)
+					{
+						if (c.symbols.count(name)) return c.fail("duplicate label '" + name + "'");
+						c.symbols[name] = c.addr;
+					}
 					s = s.substr(p + 1);
 					trim(s);
 					if (s.empty()) continue;
@@ -394,11 +454,10 @@ namespace
 				{
 					bool ok = true, symbolic = false;
 					const int v = parse_expr(c, s.substr(q + 1), ok, symbolic);
-					if (!final)
-					{
-						if (!ok) return c.fail("bad equate value");
-						c.symbols[to_upper(s.substr(0, p))] = v;
-					}
+					if (!ok) return c.fail(final ? "unresolved symbol in equate" : "bad equate value");
+					// Update on both passes: an equate that forward-references a label
+					// is only correct once pass 2 has the real address.
+					c.symbols[to_upper(s.substr(0, p))] = v;
 					continue;
 				}
 			}

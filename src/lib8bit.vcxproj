@@ -167,6 +167,7 @@
     <ClInclude Include="assembler.h" />
     <ClInclude Include="cartridge.h" />
     <ClInclude Include="cpu.h" />
+    <ClInclude Include="debug.h" />
     <ClInclude Include="disk.h" />
     <ClInclude Include="machine.h" />
     <ClInclude Include="opcodes.h" />
@@ -177,6 +178,7 @@
     <ClCompile Include="assembler.cpp" />
     <ClCompile Include="cartridge.cpp" />
     <ClCompile Include="cpu.cpp" />
+    <ClCompile Include="debug.cpp" />
     <ClCompile Include="disk.cpp" />
     <ClCompile Include="machine.cpp" />
     <ClCompile Include="opcodes.cpp" />

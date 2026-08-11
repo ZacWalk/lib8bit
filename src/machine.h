@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 #include "cartridge.h"
 #include "sid.h"
@@ -17,52 +18,7 @@ extern uint8_t rom_kernal[8192];
 extern uint8_t rom_basic[8192];
 extern uint8_t rom_chars[];
 
-constexpr uint32_t rgb(const uint32_t r, const uint32_t g, const uint32_t b)
-{
-	return r << 16 | g << 8 | b;
-}
-
-constexpr uint32_t bgr(const uint32_t rgb)
-{
-	return ((rgb & 0xff0000) >> 16) | (rgb & 0x00ff00) | ((rgb & 0x0000ff) << 16);
-}
-
-constexpr uint32_t c64_black = rgb(0, 0, 0);
-constexpr uint32_t c64_white = rgb(253, 254, 252);
-constexpr uint32_t c64_red = rgb(190, 26, 36);
-constexpr uint32_t c64_cyan = rgb(48, 230, 198);
-constexpr uint32_t c64_purple = rgb(180, 26, 226);
-constexpr uint32_t c64_green = rgb(31, 162, 30);
-constexpr uint32_t c64_blue = rgb(33, 27, 174);
-constexpr uint32_t c64_yellow = rgb(223, 246, 10);
-constexpr uint32_t c64_orange = rgb(184, 65, 4);
-constexpr uint32_t c64_brown = rgb(106, 51, 4);
-constexpr uint32_t c64_light_red = rgb(254, 74, 87);
-constexpr uint32_t c64_dark_grey = rgb(66, 69, 64);
-constexpr uint32_t c64_grey = rgb(112, 116, 111);
-constexpr uint32_t c64_light_green = rgb(89, 254, 89);
-constexpr uint32_t c64_light_blue = rgb(95, 83, 254);
-constexpr uint32_t c64_light_grey = rgb(164, 167, 162);
-
-constexpr uint32_t c64_pallette[] =
-{
-	c64_black,
-	c64_white,
-	c64_red,
-	c64_cyan,
-	c64_purple,
-	c64_green,
-	c64_blue,
-	c64_yellow,
-	c64_orange,
-	c64_brown,
-	c64_light_red,
-	c64_dark_grey,
-	c64_grey,
-	c64_light_green,
-	c64_light_blue,
-	c64_light_grey,
-};
+struct debug_state;
 
 constexpr uint8_t FLAG_CARRY = 0x01;
 constexpr uint8_t FLAG_ZERO = 0x02;
@@ -84,8 +40,6 @@ constexpr uint32_t mem_border_color = 0xd020;
 constexpr uint32_t mem_text_color = 0xd800;
 constexpr uint32_t text_video_mem_offset = 1024;
 
-using address_t = unsigned short;
-
 enum class machine_key
 {
 	back,
@@ -97,7 +51,7 @@ enum class machine_key
 
 struct CPUSTATUS
 {
-	address_t pc;
+	uint16_t pc;
 	uint8_t sp;
 	uint8_t a;
 	uint8_t x;
@@ -176,9 +130,32 @@ struct vic_chip
 	uint16_t raster_compare = 0; // raster line that raises the raster IRQ
 	uint8_t irq_enable = 0;      // $D01A interrupt enable mask
 	uint8_t irq_status = 0;      // $D019 interrupt status (bit 7 = active)
-	int32_t raster_cycle = 0;    // free-running cycle counter for raster position
+	int32_t raster_line = 0;     // current raster line (0 .. RASTER_LINES_PER_FRAME-1)
+	int32_t line_cycle = 0;      // cycle position within the current raster line
 	int32_t last_raster_line = -1;
-	bool bad_line_stunned = false;
+};
+
+// The on-screen front end for a playing PSID/RSID tune: the tune's metadata,
+// the sub-tune list and the level meters are painted into the emulated text
+// screen once per exec(), and the number keys and X are read straight from the
+// keyboard matrix. Everything here is host independent — a host only has to
+// feed keys and show the frame buffer, exactly as for any other program.
+struct sid_player_state
+{
+	bool active = false;
+	std::vector<uint8_t> file; // the tune image, so another sub-tune can be started
+	char title[33] = {};
+	char author[33] = {};
+	char released[33] = {};
+	bool chip_8580 = false;    // the SID model the header asks for
+	bool timed_by_cia = false; // play routine driven by a CIA timer, not the raster
+	int songs = 1;
+	int song = 1;             // 1-based, the sub-tune now playing
+	uint16_t screen_base = 0x0400;
+	int64_t start_ticks = 0;  // clock_ticks when this sub-tune started
+	uint32_t clock_hz = 985248;
+	uint8_t prev_keys[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+	uint8_t peak[3] = {};     // decaying peak-hold marker per voice
 };
 
 struct machine_state
@@ -214,10 +191,14 @@ struct machine_state
 	bool is_kernal_on = true;
 	bool is_io_on = true;
 	bool is_char_on = false;
+	// Configuration the page tables were last built for; update_memory_map() is on
+	// hot paths (every $00/$01 and $DE00-$DFFF access) so it early-outs on a match.
+	uint32_t memory_map_key = 0xFFFFFFFF;
 
 	// --- CPU interrupt lines ------------------------------------------------
 	bool irq_pending = false; // level-triggered: asserted while any IRQ source active
 	bool nmi_pending = false; // edge-triggered: set on the high->low NMI transition
+	bool ext_irq = false;     // host-raised IRQ (machine::irq), cleared when taken
 
 	// --- Chips --------------------------------------------------------------
 	cia_chip cia1; // keyboard / joystick / system 60 Hz IRQ timer
@@ -225,6 +206,18 @@ struct machine_state
 	vic_chip vic;  // raster + raster interrupt
 	sid_chip sid;  // MOS6581/8580 sound chip
 	cartridge cart; // optional .CRT cartridge (ROML/ROMH + bank switching)
+	// The SID registers are write-only, so keep the last value written to each
+	// for monitors to display.
+	uint8_t sid_regs[32] = {};
+
+	// --- Disk drive (device 8) ----------------------------------------------
+	// A mounted .d64/.d71/.d81 image, empty when the drive is empty. It survives
+	// reset, exactly as a disk left in a real drive does.
+	std::vector<uint8_t> disk;
+
+	// --- SID tune front end -------------------------------------------------
+	// Only meaningful while a .sid tune is playing; reset() clears it.
+	sid_player_state sid_player;
 
 	// --- Input --------------------------------------------------------------
 	uint8_t joystick1 = 0xFF; // CIA1 Port B ($DC01), bits active low
@@ -273,6 +266,7 @@ struct machine_state
 	void sid_write(uint16_t reg, uint8_t value);
 
 	// Interrupt line aggregation.
+	void update_vic_irq();
 	void update_irq_line();
 	void update_nmi();
 
@@ -280,6 +274,11 @@ struct machine_state
 	void tick_cia(cia_chip& c, int32_t cycles, bool is_cia2);
 	void tick_vic(int32_t cycles);
 	void step_hardware(int32_t cycles);
+
+	// Service the KERNAL LOAD routine from the mounted disk image and return
+	// through a simulated RTS. Returns false when the request is not ours (no
+	// disk, not device 8, a verify, or no filename), leaving the ROM to run.
+	bool kernal_load();
 };
 
 class machine
@@ -290,10 +289,17 @@ public:
 	machine();
 	~machine();
 
+	// machine owns _state; copying would double-free it.
+	machine(const machine&) = delete;
+	machine& operator=(const machine&) = delete;
+
 	uint8_t convert_char(wchar_t c);
 	void add_char(wchar_t c);
 	void add_key(machine_key key);
 	void exec(int32_t tick_count = 1000000 / 50);
+
+	// Raise an externally driven IRQ. Serviced at the next instruction boundary,
+	// so its 7-cycle entry is charged like any other interrupt.
 	void irq();
 
 	// Load a Commodore .PRG file into RAM.
@@ -304,6 +310,10 @@ public:
 	bool load_prg(const uint8_t* data, size_t size);
 
 	bool video_is_invalid() const;
+
+	// Fill `out` with a side-effect-free snapshot of the CPU, banking, VIC-II,
+	// CIA and SID state plus a disassembly window around the PC (see debug.h).
+	void capture_debug(debug_state& out) const;
 
 	// --- VIC-II frame buffer -------------------------------------------------
 	// Enable per-scanline rendering into the frame buffer during exec(). Hosts
@@ -332,12 +342,34 @@ public:
 	bool load_crt(const uint8_t* data, size_t size);
 	void eject_crt();
 
+	// --- Disk drive ----------------------------------------------------------
+	// Insert a .d64/.d71/.d81 image into device 8. The image stays mounted, so
+	// the KERNAL LOAD routine is serviced from it: a program can LOAD further
+	// files while it runs, and LOAD"$",8 lists the directory. The bytes are
+	// copied, so the caller's buffer need not outlive the call. Returns false if
+	// the image is not a recognised disk format.
+	bool insert_disk(const uint8_t* data, size_t size);
+	void eject_disk();
+	bool has_disk() const;
+
 	// Load and start a PSID/RSID tune. Parses the header, installs a small
 	// player driver in RAM, calls the tune's init routine and arms the CIA/VIC
 	// interrupt so the play routine runs each frame. Enables audio. Pass a
 	// 1-based song number or 0 to use the file's default. Returns false on a
 	// malformed image.
+	//
+	// A text front end showing the tune's metadata, its sub-tunes and live voice
+	// levels is painted into the emulated screen by exec(), which also reads the
+	// keyboard matrix: keys 1-9 pick a sub-tune and X stops playback.
 	bool load_sid(const uint8_t* data, size_t size, int song = 0);
+	bool sid_player_active() const;
+	int sid_song_count() const;
+	int sid_song() const; // 1-based, 0 when no tune is playing
+	// Start another sub-tune of the loaded tune (1-based). False if none is loaded
+	// or the number is out of range.
+	bool sid_select_song(int song);
+	// Stop playback and return the machine to a bare reset.
+	void stop_sid();
 
 	// --- Audio ---------------------------------------------------------------
 	// Enable SID audio generation (off by default). Selects the chip model too.

@@ -146,6 +146,7 @@ class sid_filter
 public:
 	explicit sid_filter(bool is_6581);
 
+	void set_model(bool is_6581);
 	void reset();
 	void input(int v) { ve = v; }
 	int clock(voice& v1, voice& v2, voice& v3);
@@ -163,8 +164,10 @@ private:
 	int mix_output(int vo);
 	void update_resonance(int res) { resonance_coeff = 1.0 / (0.707 + res * 0.22); }
 	void update_w0() { w0 = freq_table[fc < 2048 ? fc : 2047]; }
+	// Volume-register DC step that produces the 6581 "digi" click; the 8580 has none.
+	void update_digi_dc() { digi_dc = is6581 ? static_cast<int>((vol - 7.5) * 1024) : 0; }
 
-	bool is6581;
+	bool is6581 = true;
 	int vhp = 0, vbp = 0, vlp = 0, ve = 0;
 	int fc = 0;
 	double w0 = 0;
@@ -172,9 +175,10 @@ private:
 	bool filt1 = false, filt2 = false, filt3 = false, filtE = false;
 	bool voice3off = false, hp = false, bp = false, lp = false;
 	int vol = 0;
+	int digi_dc = 0;
 	bool enabled = true;
 	uint8_t filt = 0;
-	float freq_table[2048] = {};
+	const float* freq_table = nullptr;
 };
 
 // C64 audio output stage: 16 kHz low-pass + ~1.6 Hz DC blocker.
@@ -207,7 +211,12 @@ public:
 	// Apply a register write immediately (used when audio output is disabled).
 	void write_now(uint16_t offset, uint8_t value) { apply_register_write(offset & 0x1F, value); }
 
-	void begin_frame();
+	// Current envelope level of a voice (0-255), for monitors: the registers are
+	// write-only, so this is the only way to see whether a voice is sounding.
+	uint8_t envelope_level(int v) const { return voices[v & 3].envelope.output(); }
+
+	// Frame-boundary hook kept for hosts; clock() drains the write queue itself.
+	void begin_frame() {}
 	// Clock the chip for `cycles`, replaying queued writes at their timestamps,
 	// appending up to max_samples 16-bit samples to buf. Returns samples written.
 	int clock(int cycles, int16_t* buf, int64_t start_cycle, int max_samples);
@@ -225,13 +234,11 @@ private:
 	int resampler_output();
 
 	voice voices[3];
-	sid_filter filter6581;
-	sid_filter filter8580;
-	sid_filter* filter;
+	sid_filter filter;
 	external_filter ext_filter;
 
 	sid_model model = sid_model::mos8580;
-	double scale_factor = 0.4;
+	double scale_factor = 0.2;
 	int model_ttl = 0xA2000;
 
 	uint8_t bus_value = 0;
@@ -251,5 +258,4 @@ private:
 	int fir_index = 0;
 
 	std::vector<queued_write> write_queue;
-	size_t write_queue_index = 0;
 };

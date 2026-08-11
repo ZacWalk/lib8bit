@@ -7,11 +7,19 @@
 
 #include "cpu.h"
 #include "machine.h"
+#include "opcodes.h"
 
 
 #define BASE_STACK     0x100
 
 
+// Everything below is internal to the CPU core; only cpu_exec, cpu_irq and
+// nmi6502 have external linkage so lib8bit can be linked into a host app.
+namespace
+{
+// Entry point of the KERNAL's own LOAD routine, i.e. the default contents of
+// the LOAD vector at $0330 (see machine_state::kernal_load).
+constexpr uint16_t KERNAL_LOAD_TRAP = 0xF4A5;
 //general functions used by various other functions
 void push16(machine_state* s, const uint16_t pushval)
 {
@@ -180,21 +188,26 @@ uint16_t adc(machine_state* s, const uint16_t value)
 
 	if (s->cpu.status & FLAG_DECIMAL)
 	{
-		// Proper BCD addition with carry propagation between nybbles.
+		// Proper BCD addition with carry propagation between nybbles. On the NMOS
+		// 6502 Z comes from the binary sum above, but N and V are taken from the
+		// intermediate result after the low-nybble fixup and before the high one.
 		unsigned al = (s->cpu.a & 0x0F) + (operand & 0x0F) + carry_in;
-		unsigned ah = (s->cpu.a >> 4) + (operand >> 4);
-		if (al > 0x09)
-		{
-			al += 0x06;
-			ah++;
-		}
-		if (ah > 0x09)
-		{
-			ah += 0x06;
+		if (al > 0x09) al = ((al + 0x06) & 0x0F) + 0x10;
+		unsigned bcd = (s->cpu.a & 0xF0) + (operand & 0xF0) + al;
+
+		s->cpu.calc_sign(static_cast<uint16_t>(bcd));
+		if ((~(s->cpu.a ^ operand) & (s->cpu.a ^ bcd) & 0x80) != 0)
+			s->cpu.set_overflow();
+		else
+			s->cpu.clear_overflow();
+
+		if (bcd >= 0xA0) bcd += 0x60;
+		if (bcd > 0xFF)
 			s->cpu.set_carry();
-		}
-		else { s->cpu.clear_carry(); }
-		return static_cast<uint16_t>(((ah << 4) | (al & 0x0F)) & 0xFF);
+		else
+			s->cpu.clear_carry();
+
+		return static_cast<uint16_t>(bcd & 0xFF);
 	}
 
 	return result;
@@ -344,7 +357,7 @@ void cld(machine_state* s)
 	s->cpu.clear_decimal();
 }
 
-void cli1(machine_state* s)
+void cli(machine_state* s)
 {
 	s->cpu.clear_interrupt();
 }
@@ -630,7 +643,7 @@ void sed(machine_state* s)
 	s->cpu.set_decimal();
 }
 
-void sei1(machine_state* s)
+void sei(machine_state* s)
 {
 	s->cpu.set_interrupt();
 }
@@ -679,6 +692,7 @@ void tya(machine_state* s)
 	s->cpu.calc_zero(s->cpu.a);
 	s->cpu.calc_sign(s->cpu.a);
 }
+} // namespace
 
 
 void nmi6502(machine_state* s)
@@ -704,6 +718,8 @@ void cpu_irq(machine_state* s)
 	s->cpu.pc = static_cast<uint16_t>(s->ram_read(0xFFFE)) | (static_cast<uint16_t>(s->ram_read(0xFFFF)) << 8);
 }
 
+namespace
+{
 // Read instructions using abs,X / abs,Y / (ind),Y that pay the page-cross
 // penalty (one extra cycle when the effective address crosses a page).
 constexpr bool penalty_op(const uint8_t opcode)
@@ -744,6 +760,16 @@ constexpr uint8_t ticktable[256] = {
 	2, 5, 2, 8, 4, 4, 6, 6, 2, 4, 2, 7, 4, 4, 7, 7
 };
 
+// A 6502 read-modify-write instruction writes the unmodified byte back before
+// the modified one. C64 code depends on that dummy write reaching I/O, which is
+// what makes INC $D019 / LSR $D019 / DEC $DC0D acknowledge an interrupt.
+void rmw(machine_state* s, const uint16_t ea, uint16_t (*op)(machine_state*, uint16_t))
+{
+	const uint16_t value = get_ea(s, ea);
+	put_ea(s, value, ea);
+	put_ea(s, op(s, value), ea);
+}
+
 
 // Service a pending interrupt at an instruction boundary, mirroring the 6510's
 // behaviour: NMI is edge-triggered and always taken; IRQ is level-triggered and
@@ -760,6 +786,8 @@ static bool cpu_service_interrupts(machine_state* s)
 
 	if (s->irq_pending && (s->cpu.status & FLAG_INTERRUPT) == 0)
 	{
+		s->ext_irq = false; // a host-raised IRQ is a pulse, not a held line
+		s->update_irq_line();
 		cpu_irq(s);
 		s->clock_ticks += 7;
 		return true;
@@ -767,6 +795,7 @@ static bool cpu_service_interrupts(machine_state* s)
 
 	return false;
 }
+} // namespace
 
 
 void cpu_exec(machine_state* s, const int32_t tick_count)
@@ -784,6 +813,13 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			s->step_hardware(static_cast<int32_t>(s->clock_ticks - cycles_before));
 			continue;
 		}
+
+		// $F4A5 is where the LOAD vector at $0330 points by default. Servicing it
+		// from the mounted disk image is what lets a program load further files;
+		// a program that revectors $0330 to its own loader is not intercepted.
+		if (s->cpu.pc == KERNAL_LOAD_TRAP && !s->disk.empty() && !s->raw_ram
+			&& s->read_map[0xF4] == 2 && s->kernal_load())
+			continue;
 
 		const auto opcode = s->ram_read(s->cpu.pc++);
 		s->cpu.status |= FLAG_CONSTANT;
@@ -805,7 +841,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x6:
 			ea = zp(s);
-			put_ea(s, asl(s, get_ea(s, ea)), ea);
+			rmw(s, ea, asl);
 			break;
 		case 0x8:
 			imp(s);
@@ -824,7 +860,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0xE:
 			ea = abso(s);
-			put_ea(s, asl(s, get_ea(s, ea)), ea);
+			rmw(s, ea, asl);
 			break;
 		case 0x10:
 			bpl(s, rel(s));
@@ -839,7 +875,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x16:
 			ea = zpx(s);
-			put_ea(s, asl(s, get_ea(s, ea)), ea);
+			rmw(s, ea, asl);
 			break;
 		case 0x18:
 			imp(s);
@@ -855,7 +891,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x1E:
 			ea = absx(s);
-			put_ea(s, asl(s, get_ea(s, ea)), ea);
+			rmw(s, ea, asl);
 			break;
 		case 0x20:
 			ea = abso(s);
@@ -875,7 +911,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x26:
 			ea = zp(s);
-			put_ea(s, rol(s, get_ea(s, ea)), ea);
+			rmw(s, ea, rol);
 			break;
 		case 0x28:
 			imp(s);
@@ -898,7 +934,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x2E:
 			ea = abso(s);
-			put_ea(s, rol(s, get_ea(s, ea)), ea);
+			rmw(s, ea, rol);
 			break;
 		case 0x30:
 			bmi(s, rel(s));
@@ -913,7 +949,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x36:
 			ea = zpx(s);
-			put_ea(s, rol(s, get_ea(s, ea)), ea);
+			rmw(s, ea, rol);
 			break;
 		case 0x38:
 			imp(s);
@@ -929,7 +965,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x3E:
 			ea = absx(s);
-			put_ea(s, rol(s, get_ea(s, ea)), ea);
+			rmw(s, ea, rol);
 			break;
 		case 0x40:
 			imp(s);
@@ -945,7 +981,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x46:
 			ea = zp(s);
-			put_ea(s, lsr(s, get_ea(s, ea)), ea);
+			rmw(s, ea, lsr);
 			break;
 		case 0x48:
 			imp(s);
@@ -968,7 +1004,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x4E:
 			ea = abso(s);
-			put_ea(s, lsr(s, get_ea(s, ea)), ea);
+			rmw(s, ea, lsr);
 			break;
 		case 0x50:
 			bvc(s, rel(s));
@@ -983,11 +1019,11 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x56:
 			ea = zpx(s);
-			put_ea(s, lsr(s, get_ea(s, ea)), ea);
+			rmw(s, ea, lsr);
 			break;
 		case 0x58:
 			imp(s);
-			cli1(s);
+			cli(s);
 			break;
 		case 0x59:
 			ea = absy(s);
@@ -999,7 +1035,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x5E:
 			ea = absx(s);
-			put_ea(s, lsr(s, get_ea(s, ea)), ea);
+			rmw(s, ea, lsr);
 			break;
 		case 0x60:
 			imp(s);
@@ -1015,7 +1051,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x66:
 			ea = zp(s);
-			put_ea(s, ror(s, get_ea(s, ea)), ea);
+			rmw(s, ea, ror);
 			break;
 		case 0x68:
 			imp(s);
@@ -1038,7 +1074,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x6E:
 			ea = abso(s);
-			put_ea(s, ror(s, get_ea(s, ea)), ea);
+			rmw(s, ea, ror);
 			break;
 		case 0x70:
 			bvs(s, rel(s));
@@ -1053,11 +1089,11 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x76:
 			ea = zpx(s);
-			put_ea(s, ror(s, get_ea(s, ea)), ea);
+			rmw(s, ea, ror);
 			break;
 		case 0x78:
 			imp(s);
-			sei1(s);
+			sei(s);
 			break;
 		case 0x79:
 			ea = absy(s);
@@ -1069,7 +1105,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0x7E:
 			ea = absx(s);
-			put_ea(s, ror(s, get_ea(s, ea)), ea);
+			rmw(s, ea, ror);
 			break;
 		case 0x81:
 			ea = indx(s);
@@ -1251,7 +1287,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0xC6:
 			ea = zp(s);
-			put_ea(s, dec(s, get_ea(s, ea)), ea);
+			rmw(s, ea, dec);
 			break;
 		case 0xC8:
 			imp(s);
@@ -1275,7 +1311,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0xCE:
 			ea = abso(s);
-			put_ea(s, dec(s, get_ea(s, ea)), ea);
+			rmw(s, ea, dec);
 			break;
 		case 0xD0:
 			bne(s, rel(s));
@@ -1290,7 +1326,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0xD6:
 			ea = zpx(s);
-			put_ea(s, dec(s, get_ea(s, ea)), ea);
+			rmw(s, ea, dec);
 			break;
 		case 0xD8:
 			imp(s);
@@ -1306,7 +1342,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0xDE:
 			ea = absx(s);
-			put_ea(s, dec(s, get_ea(s, ea)), ea);
+			rmw(s, ea, dec);
 			break;
 		case 0xE0:
 			ea = imm(s);
@@ -1326,7 +1362,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0xE6:
 			ea = zp(s);
-			put_ea(s, inc(s, get_ea(s, ea)), ea);
+			rmw(s, ea, inc);
 			break;
 		case 0xE8:
 			imp(s);
@@ -1350,7 +1386,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0xEE:
 			ea = abso(s);
-			put_ea(s, inc(s, get_ea(s, ea)), ea);
+			rmw(s, ea, inc);
 			break;
 		case 0xF0:
 			beq(s, rel(s));
@@ -1365,7 +1401,7 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0xF6:
 			ea = zpx(s);
-			put_ea(s, inc(s, get_ea(s, ea)), ea);
+			rmw(s, ea, inc);
 			break;
 		case 0xF8:
 			imp(s);
@@ -1381,8 +1417,17 @@ void cpu_exec(machine_state* s, const int32_t tick_count)
 			break;
 		case 0xFE:
 			ea = absx(s);
-			put_ea(s, inc(s, get_ea(s, ea)), ea);
+			rmw(s, ea, inc);
 			break;
+		default:
+		{
+			// Illegal/undocumented opcodes are not emulated, but their operand bytes
+			// must still be consumed or the instruction stream derails. JAM/KIL has
+			// no length: leave PC on the opcode so the CPU spins there.
+			const int len = opcodes[opcode].length;
+			s->cpu.pc = static_cast<uint16_t>(s->cpu.pc + (len == 0 ? -1 : len - 1));
+			break;
+		}
 		}
 
 		s->clock_ticks += static_cast<int32_t>(ticktable[opcode]);
