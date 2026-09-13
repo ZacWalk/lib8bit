@@ -1,6 +1,6 @@
 # lib8bit
 
-[![CI](https://github.com/ZacWalk/lib8bit/actions/workflows/ci.yml/badge.svg)](https://github.com/ZacWalk/lib8bit/actions/workflows/ci.yml)
+[![Build](https://github.com/ZacWalk/lib8bit/actions/workflows/build.yml/badge.svg)](https://github.com/ZacWalk/lib8bit/actions/workflows/build.yml)
 
 A compact Commodore 64 emulator packaged as a C++20 static library, plus a small
 Win32 app that drives it.
@@ -42,21 +42,18 @@ clocks.
 
 ## Build and run
 
-```powershell
-.\dd.ps1 test   # build + run the test suite
-.\dd.ps1 run    # build + launch the Win32 app
-```
-
-Or with MSBuild directly:
+Requires Windows x64 and Visual Studio with the Desktop C++ workload. The
+vendored [dd](https://github.com/ZacWalk/dd) runtime locates Visual Studio and
+uses the CMake and Ninja that ship with it.
 
 ```powershell
-msbuild lib8bit.sln /m /p:Configuration=Release /p:Platform=x64
+.\dd.ps1 build        # both configurations
+.\dd.ps1 test         # build and run the emulator suite
+.\dd.ps1 run          # build, then launch the Win32 app
 ```
 
-Binaries land in `bin/` as `<name><64|32><r|d>` — architecture then
-configuration, e.g. `lib8bit64d.lib`, `app8bit64r.exe`, `test8bit64d.exe`.
-Intermediate artifacts go under `intermediate/`.
-
+The app lands in `bin/` as `app8bit64r.exe` (Release) or `app8bit64d.exe`
+(Debug); the test binary is `lib8bit_tests.exe` / `lib8bit_testsd.exe`.
 ## The app
 
 Open a `.prg`, `.crt`, `.sid`, `.d64`, `.d71` or `.d81` through **File > Open**,
@@ -81,9 +78,9 @@ the machine to BASIC.
 
 ## Embedding
 
-Add a project reference to `src/lib8bit.vcxproj`, include `src/machine.h`, and
-link the matching `lib8bit<arch><cfg>.lib`. The consuming project must use the
-same architecture, configuration and C runtime library.
+Link the `lib8bit` static library target and include `src/machine.h`. From CMake,
+`add_subdirectory` this repository and link `lib8bit::lib8bit`; the consuming
+project must use the same architecture, configuration and C runtime library.
 
 `machine` owns a `machine_state` and is non-copyable. Feed it bytes
 (`load_prg`, `load_crt`, `load_sid`, `insert_disk`), step it with `exec(cycles)`,
@@ -92,7 +89,7 @@ worked host, and [docs/design.md](docs/design.md) explains the execution model.
 
 ## Tests
 
-`test8bit64d.exe` runs ~170 assertions and returns non-zero on failure: every
+`lib8bit_testsd.exe` runs ~170 assertions and returns non-zero on failure: every
 documented CPU opcode with flags and cycle counts, pixel-exact VIC-II output for
 each graphics mode and for sprite collisions, CIA timer and interrupt behaviour,
 the assembler, a full KERNAL cold boot to the `READY.` prompt, keyboard input
@@ -105,11 +102,11 @@ needs copying next to the executable).
 It doubles as a small toolbox:
 
 ```powershell
-.\bin\test8bit64d.exe --list-disk .\test\1942.d64            # list a disk image
-.\bin\test8bit64d.exe --run-disk .\test\1942.d64 "1942*"     # mount, LOAD, RUN
-.\bin\test8bit64d.exe --run-prg .\test\example.prg           # boot, load, run a PRG
-.\bin\test8bit64d.exe --run-bin <file> <loadHex> <startHex>  # run a raw 6502 binary
-.\bin\test8bit64d.exe --asm <file.asm>                       # assemble 6502 source
+.\bin\lib8bit_testsd.exe --list-disk .\test\1942.d64            # list a disk image
+.\bin\lib8bit_testsd.exe --run-disk .\test\1942.d64 "1942*"     # mount, LOAD, RUN
+.\bin\lib8bit_testsd.exe --run-prg .\test\example.prg           # boot, load, run a PRG
+.\bin\lib8bit_testsd.exe --run-bin <file> <loadHex> <startHex>  # run a raw 6502 binary
+.\bin\lib8bit_testsd.exe --asm <file.asm>                       # assemble 6502 source
 ```
 
 ## Reference implementation
