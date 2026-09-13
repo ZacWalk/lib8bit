@@ -15,8 +15,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <iostream>
-#include <string>
+#include <iostream>#include <string>
+#ifdef _MSC_VER
+#include <crtdbg.h>
+#include <cstdlib>
+#endif#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -178,10 +181,13 @@ namespace
 		result.hardware_type = read_big_endian_16(bytes, 0x16);
 
 		auto offset = static_cast<size_t>(header_size);
+		constexpr std::string_view chip_signature = "CHIP";
 		while (offset < bytes.size())
 		{
+			// One named object, not two literals: "CHIP" and "CHIP" + 4 are distinct
+			// arrays unless the compiler pools them, so that range is not valid.
 			if (bytes.size() - offset < 16 ||
-				!std::equal("CHIP", "CHIP" + 4, bytes.begin() + offset))
+				!std::equal(chip_signature.begin(), chip_signature.end(), bytes.begin() + offset))
 				return result;
 
 			const auto packet_size = read_big_endian_32(bytes, offset + 4);
@@ -867,6 +873,20 @@ namespace
 
 int main(const int argc, char** argv)
 {
+#ifdef _MSC_VER
+	// A failed CRT or STL debug assertion otherwise opens a modal dialog, which
+	// hangs CTest and CI until it times out. Report to stderr and exit instead.
+	_CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+	_CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+	_CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+	_CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+	_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
+
+	// Unbuffered so an abort does not truncate the log: the last line printed is
+	// then genuinely the last test reached.
+	std::cout << std::unitbuf;
+
 	if (argc == 3 && std::string_view(argv[1]) == "--list-disk")
 		return list_disk(argv[2]) ? 0 : 1;
 
