@@ -1,0 +1,15 @@
+{
+  "generator": "Ninja",
+  "files": {
+    "C:\\code\\apps\\lib8bit\\CMakePresets.json": "0481D9FF83B50D33D851DCB28EB79E0B61AC7FFC9B4A301C15D07B0615EC353E"
+  },
+  "directory": "C:\\code\\apps\\lib8bit\\build\\release",
+  "multiConfig": false,
+  "manifestHash": "52E29723E1FE6FD86D54EDBDE4F79D8804740ECB03D51B462CF6AA0601A740E7",
+  "root": "C:\\code\\apps\\lib8bit",
+  "mapping": {
+    "configure": "release",
+    "build": "release",
+    "test": "release"
+  }
+}
