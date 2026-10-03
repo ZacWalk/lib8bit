@@ -54,6 +54,7 @@ uses the CMake and Ninja that ship with it.
 
 The app lands in `bin/` as `app8bit64r.exe` (Release) or `app8bit64d.exe`
 (Debug); the test binary is `lib8bit_tests.exe` / `lib8bit_testsd.exe`.
+
 ## The app
 
 Open a `.prg`, `.crt`, `.sid`, `.d64`, `.d71` or `.d81` through **File > Open**,
