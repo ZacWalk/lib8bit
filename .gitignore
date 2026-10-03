@@ -6,3 +6,4 @@ debug_trace.log
 
 # CMake / Ninja build output
 build/
+/.dd/state/
