@@ -39,6 +39,7 @@ target_compile_options(lib8bit PRIVATE /W3 /MP /permissive-)
 add_executable(app8bit WIN32
     app/app.cpp
     app/app.rc
+    app/app.manifest
 )
 target_link_libraries(app8bit PRIVATE lib8bit::lib8bit)
 target_include_directories(app8bit PRIVATE app)
@@ -66,4 +67,8 @@ if(BUILD_TESTING)
     )
     add_test(NAME lib8bit_emulator COMMAND lib8bit_tests)
     set_tests_properties(lib8bit_emulator PROPERTIES TIMEOUT 300 LABELS lib8bit)
+
+    add_test(NAME lib8bit_app_manifest COMMAND "${CMAKE_COMMAND}"
+        "-DEXE=$<TARGET_FILE:app8bit>" -P "${PROJECT_SOURCE_DIR}/test/manifest.cmake")
+    set_tests_properties(lib8bit_app_manifest PROPERTIES TIMEOUT 30 LABELS lib8bit)
 endif()
