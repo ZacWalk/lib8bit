@@ -56,8 +56,16 @@ Outputs go to `bin/`: `app8bit64d.exe` and `app8bit64r.exe` for the app,
 `lib8bit_testsd.exe` and `lib8bit_tests.exe` for the suite. The library and the
 intermediates stay under `build/<config>/`.
 
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) builds and tests
+CI ([.github/workflows/build.yml](.github/workflows/build.yml)) builds and tests
 Debug and Release x64 on every push and PR.
+
+The vendored [dd](https://github.com/ZacWalk/dd) driver is the upstream copy:
+`dd.ps1` plus `.dd/`, checked by the hashes in
+[docs/dd-upstream.json](docs/dd-upstream.json). This repository's settings are
+in `dd.psd1`; dependency pins are in `cmake/dd-dependencies.json`; and
+`.\dd.ps1 commands --json` lists project commands. dd documents its own
+[CLI/MCP modes](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes)
+and [command set](https://github.com/ZacWalk/dd/blob/main/docs/cli.md#commands).
 
 ## What The Tests Pin
 
@@ -90,4 +98,3 @@ Note that several tests pin the *current* convention rather than hardware truth
 (the `$D011` YSCROLL baseline, the sprite-Y offset, the Timer B cascade period).
 Those are listed at the end of that document — changing one means changing its
 test in the same commit, deliberately.
-
