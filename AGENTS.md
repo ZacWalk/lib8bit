@@ -33,31 +33,28 @@ See [README.md](README.md) for what the emulator covers at a glance.
 
 ## Build And Validation
 
-`dd.ps1` builds and runs in one step and finds MSBuild via `vswhere`, so no
-developer prompt is needed. It defaults to Debug x64 (`run` defaults to Release):
+Build with the vendored dd driver in PowerShell 7.4+; it sets up the MSVC
+environment itself, so no developer prompt is needed. `build` and `test` cover
+Debug and Release, and x64 is the only platform:
 
 ```powershell
-.\dd.ps1 test               # build + run the test suite
-.\dd.ps1 run                # build + launch the Win32 app
-.\dd.ps1 test -Release      # Release
-.\dd.ps1 test -Win32        # 32-bit
+.\dd.ps1 test --label lib8bit   # build both configs + run the emulator suite
+.\dd.ps1 build release          # or debug
+.\dd.ps1 launch                 # build Release + start the Win32 app
 ```
 
-Direct MSBuild after any source or project change:
+After a build the suite also runs directly:
 
 ```powershell
-msbuild lib8bit.sln /m /p:Configuration=Debug /p:Platform=x64
-.\bin\test8bit64d.exe       # returns non-zero on failure
+.\bin\lib8bit_testsd.exe        # Debug; lib8bit_tests.exe is Release. Non-zero on failure
 ```
 
-Gotcha: at the **solution** level the 32-bit platform is named `x86`
-(`/p:Platform=x86`); `Platform=Win32` only works on an individual `.vcxproj`.
-For changes to project configuration or to public headers, also build
-`Release|x64` and `Debug|x86`.
+For changes to the build or to public headers, build and test both
+configurations.
 
-Outputs go to `bin/` as `<name><64|32><r|d>` (`64`/`32` = x64/Win32,
-`d`/`r` = Debug/Release), e.g. `lib8bit64d.lib`, `app8bit64d.exe`,
-`test8bit64d.exe`. Intermediates stay under `intermediate/`.
+Outputs go to `bin/`: `app8bit64d.exe` and `app8bit64r.exe` for the app,
+`lib8bit_testsd.exe` and `lib8bit_tests.exe` for the suite. The library and the
+intermediates stay under `build/<config>/`.
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) builds and tests
 Debug and Release x64 on every push and PR.
@@ -79,9 +76,9 @@ deliberately:
 - Full-machine: KERNAL cold boot to `READY.`, `PRINT 6*7` typed through the
   keyboard matrix, `example.prg`, `1942.d64`, and the `.crt` fixtures.
 
-A green build proves nothing on its own — run `.\dd.ps1 test` and check for
-`FAIL` lines. Smoke-test `app/` changes by launching the app; the title bar
-reports media, input mode, pause state and whether audio started.
+A green build proves nothing on its own — run `.\dd.ps1 test --label lib8bit`
+and check for `FAIL` lines. Smoke-test `app/` changes by launching the app; the
+title bar reports media, input mode, pause state and whether audio started.
 
 ## Known Gaps
 
