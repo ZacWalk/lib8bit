@@ -49,7 +49,7 @@ uses the CMake and Ninja that ship with it.
 ```powershell
 .\dd.ps1 build        # both configurations
 .\dd.ps1 test         # build and run the emulator suite
-.\dd.ps1 run          # build, then launch the Win32 app
+.\dd.ps1 launch       # build Release, then start the Win32 app
 ```
 
 The app lands in `bin/` as `app8bit64r.exe` (Release) or `app8bit64d.exe`
