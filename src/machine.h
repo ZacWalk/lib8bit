@@ -309,6 +309,11 @@ public:
 	// and "RUN\n" is queued so the program autostarts. Returns false on bad data.
 	bool load_prg(const uint8_t* data, size_t size);
 
+	// True when load_prg() would accept the bytes: a load address followed by at
+	// least one byte, all of it below $10000. Lets a host reject a file before it
+	// resets the machine to load it.
+	static bool is_prg(const uint8_t* data, size_t size);
+
 	bool video_is_invalid() const;
 
 	// Fill `out` with a side-effect-free snapshot of the CPU, banking, VIC-II,
@@ -333,12 +338,28 @@ public:
 	// PB line). Held keys are seen by the kernal keyboard scan and by games that
 	// read the CIA1 matrix directly.
 	void set_key(int row, int col, bool pressed);
-	void clear_keys(); // release every key (e.g. on window focus loss)
+	void clear_keys(); // release every key and drop queued changes (e.g. on window focus loss)
+
+	// Queue a key change for the next exec() rather than making it at once. Each
+	// exec() starts by applying queued changes in order, at most one per key, so
+	// every press and every release lasts a whole exec() call. A host that runs
+	// a frame per exec() - longer than the KERNAL's keyboard scan period - then
+	// loses no key, however short the tap; with set_key() a press and release
+	// that both arrive between two exec() calls are never seen.
+	void queue_key(int row, int col, bool pressed);
+	void flush_keys(); // apply every queued change now, in order (e.g. while paused)
+
+	// Press RESTORE. It is not in the matrix: it pulses the NMI line, unless CIA2
+	// already holds the line low (the two are wire-ORed), and the KERNAL's NMI
+	// handler warm-starts BASIC if RUN/STOP is held - RUN/STOP+RESTORE. Queued
+	// like queue_key, so a RUN/STOP press queued before it is held by then.
+	void press_restore();
 
 	// --- Cartridges ----------------------------------------------------------
 	// Load a .CRT cartridge image and cold-reset the machine so it boots from
 	// the cartridge (normal carts autostart via the kernal; Ultimax carts take
-	// over the reset vector). Returns false on a malformed image.
+	// over the reset vector). Returns false on a malformed image, leaving the
+	// machine and any inserted cartridge exactly as they were.
 	bool load_crt(const uint8_t* data, size_t size);
 	void eject_crt();
 
@@ -379,4 +400,21 @@ public:
 	// the previous call, replaying SID register writes at cycle accuracy. Call
 	// once per frame after exec(). Returns the number of samples written.
 	int generate_audio(int16_t* buffer, int max_samples);
+
+private:
+	struct queued_key
+	{
+		uint8_t row;
+		uint8_t col;
+		bool pressed;
+	};
+	// More than any typist or paste could queue between two frames; past this a
+	// host that has stopped calling exec() gets its changes applied at once.
+	static constexpr size_t max_queued_keys = 512;
+	static constexpr uint8_t restore_row = 0xFF; // a queued RESTORE press, not a matrix key
+	std::vector<queued_key> _key_queue;
+
+	void push_queued_key(const queued_key& key);
+	void apply_queued_key(const queued_key& key);
+	void apply_queued_keys();
 };

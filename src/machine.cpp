@@ -752,6 +752,7 @@ bool machine::video_is_invalid() const
 
 void machine::exec(const int32_t tick_count)
 {
+	if (!_key_queue.empty()) apply_queued_keys();
 	if (_state->sid_player.active) sid_player_step(*this);
 	cpu_exec(_state, tick_count);
 }
@@ -769,15 +770,20 @@ void machine::irq()
 	_state->update_irq_line();
 }
 
-bool machine::load_prg(const uint8_t* data, const size_t size)
+bool machine::is_prg(const uint8_t* data, const size_t size)
 {
 	if (!data || size < 3) return false;
+	const size_t load_addr = static_cast<size_t>(data[0]) | (static_cast<size_t>(data[1]) << 8);
+	return load_addr + (size - 2) <= machine_state::RAM_SIZE;
+}
+
+bool machine::load_prg(const uint8_t* data, const size_t size)
+{
+	if (!is_prg(data, size)) return false;
 
 	const uint16_t load_addr = static_cast<uint16_t>(data[0]) |
 		(static_cast<uint16_t>(data[1]) << 8);
 	const size_t payload = size - 2;
-	if (static_cast<size_t>(load_addr) + payload > machine_state::RAM_SIZE)
-		return false;
 
 	std::memcpy(_state->RAM + load_addr, data + 2, payload);
 	// A program loading over $00/$01 changes the processor port latch/DDR.
@@ -846,6 +852,62 @@ void machine::set_key(const int row, const int col, const bool pressed)
 void machine::clear_keys()
 {
 	for (auto& row : _state->key_matrix) row = 0xFF;
+	_key_queue.clear();
+}
+
+void machine::queue_key(const int row, const int col, const bool pressed)
+{
+	if (row < 0 || row > 7 || col < 0 || col > 7) return;
+	push_queued_key({static_cast<uint8_t>(row), static_cast<uint8_t>(col), pressed});
+}
+
+void machine::press_restore()
+{
+	push_queued_key({restore_row, 0, true});
+}
+
+void machine::push_queued_key(const queued_key& key)
+{
+	if (_key_queue.size() >= max_queued_keys) flush_keys();
+	_key_queue.push_back(key);
+}
+
+void machine::apply_queued_key(const queued_key& key)
+{
+	if (key.row != restore_row) set_key(key.row, key.col, key.pressed);
+	else if (_state->cia2.nmi_line) _state->nmi_pending = true; // the RESTORE edge
+}
+
+void machine::flush_keys()
+{
+	for (const auto& key : _key_queue) apply_queued_key(key);
+	_key_queue.clear();
+}
+
+// Stops at the first change for a key that has already changed in this call, so
+// that change, and everything queued after it, waits for the next exec().
+void machine::apply_queued_keys()
+{
+	uint64_t changed = 0;
+	bool restored = false;
+	size_t used = 0;
+	for (; used < _key_queue.size(); ++used)
+	{
+		const auto& key = _key_queue[used];
+		if (key.row == restore_row)
+		{
+			if (restored) break;
+			restored = true;
+		}
+		else
+		{
+			const uint64_t bit = uint64_t{1} << (key.row * 8 + key.col);
+			if (changed & bit) break;
+			changed |= bit;
+		}
+		apply_queued_key(key);
+	}
+	_key_queue.erase(_key_queue.begin(), _key_queue.begin() + static_cast<std::ptrdiff_t>(used));
 }
 
 bool machine::load_crt(const uint8_t* data, const size_t size)
