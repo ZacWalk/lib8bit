@@ -58,9 +58,11 @@ The app lands in `bin/` as `app8bit64r.exe` (Release) or `app8bit64d.exe`
 ## The app
 
 Open a `.prg`, `.crt`, `.sid`, `.d64`, `.d71` or `.d81` through **File > Open**,
-by dragging it onto the window, or by passing it on the command line. A disk
-image stays in the drive after its first program starts, so games that load more
-data as they run work. The title bar always states the current machine state:
+by dragging it onto the window, or by passing it on the command line. A file
+with no extension is taken for a program; anything else is refused, leaving the
+running machine alone. A disk image stays in the drive after its first program
+starts, so games that load more data as they run work. The title bar always
+states the current machine state:
 media, input mode, pause, and whether audio started. Window position and the
 debug panel's width and visibility are remembered in
 `%APPDATA%\lib8bit\lib8bit.ini`.
@@ -71,6 +73,12 @@ debug panel's width and visibility are remembered in
 | F9 | Pause |
 | Input menu | Arrow keys act as cursor keys, Joystick 1, or Joystick 2 |
 | Help > Keyboard | The emulated C64 key mapping |
+
+Keys are mapped by position, so Shift gives the C64's own shifted symbols
+(Shift+2 is `"`). The C64 keys a PC keyboard lacks sit where VICE puts them:
+`'` is `:`, `[` and `]` are `@` and `*`, `\` is the up arrow, Page Down is `=`
+and End is `£`. Esc is RUN/STOP and Page Up is RESTORE, so Esc+Page Up breaks
+into a running program.
 
 A `.sid` tune comes up in a player screen showing its name, author, release,
 chip and timing, a running clock, live per-voice level meters and the list of
@@ -90,11 +98,12 @@ worked host, and [docs/design.md](docs/design.md) explains the execution model.
 
 ## Tests
 
-`lib8bit_testsd.exe` runs ~170 assertions and returns non-zero on failure: every
+`lib8bit_testsd.exe` runs ~190 assertions and returns non-zero on failure: every
 documented CPU opcode with flags and cycle counts, pixel-exact VIC-II output for
 each graphics mode and for sprite collisions, CIA timer and interrupt behaviour,
 the assembler, a full KERNAL cold boot to the `READY.` prompt, keyboard input
-evaluating `PRINT 6*7` as `42`, SID audio including a real `.sid` tune, disk
+evaluating `PRINT 6*7` as `42`, key taps shorter than a frame typing intact
+through `queue_key`, RUN/STOP+RESTORE, SID audio including a real `.sid` tune, disk
 loading through the KERNAL (a machine-code routine calling `SETNAM`/`SETLFS`/
 `LOAD`, `LOAD"$",8` and the `FILE NOT FOUND` path), and the PRG/CRT/D64 fixtures
 in `test/` (resolved from the source path baked in at compile time, so nothing
