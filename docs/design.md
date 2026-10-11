@@ -149,7 +149,9 @@ underflows, and ICR latch/mask/read-to-clear.
 
 CIA1 also carries the keyboard matrix (8 rows × 8 columns, active low, scanned
 in both directions) and the two joystick ports. CIA2 port A selects the VIC bank,
-through its data direction register so undriven lines float high.
+through its data direction register so undriven lines float high. RESTORE is
+not in the matrix: `machine::press_restore()` pulses the NMI line that CIA2's
+interrupt output shares, so it makes no edge while CIA2 holds the line low.
 
 ## Cartridge
 
@@ -209,6 +211,14 @@ used by tests and available to hosts.
 All access to the machine is under one mutex. Errors are reported *after* it is
 released, because `MessageBoxW` re-enters `WM_KILLFOCUS`, which wants the same
 non-recursive lock.
+
+Key presses and releases reach the machine through `machine::queue_key`, and
+each `exec()` applies the queued changes at most one per key, so every press
+and release lasts a whole frame. A frame is emulated in a burst of about a
+millisecond; writing the matrix directly would lose any tap that falls between
+two bursts — every key the On-Screen Keyboard or a macro tool types. Joystick
+presses are latched the same way until the next frame reads them. While paused,
+nothing runs a frame, so keys go straight to the matrix.
 
 The client area is composed into a single 32-bit DIB and presented with one
 `BitBlt`: nearest-neighbour integer scaling for the picture, and a debug panel

@@ -7,6 +7,7 @@
 #include "cartridge.h"
 
 #include <cstring>
+#include <utility>
 
 namespace
 {
@@ -27,7 +28,17 @@ namespace
 
 bool cartridge::load(const uint8_t* bytes, const size_t length)
 {
-	eject();
+	// Parse into a fresh cartridge and adopt it only once it is valid: a malformed
+	// image must leave the inserted cartridge, and the program running from it,
+	// untouched.
+	cartridge parsed;
+	if (!parsed.parse(bytes, length)) return false;
+	*this = std::move(parsed);
+	return true;
+}
+
+bool cartridge::parse(const uint8_t* bytes, const size_t length)
+{
 	if (!bytes || length < 0x40) return false;
 
 	if (std::memcmp(bytes, "C64 CARTRIDGE   ", 16) != 0) return false;

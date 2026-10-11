@@ -82,7 +82,8 @@ deliberately:
 - Disk: the KERNAL LOAD contract (carry, `X`/`Y` end address, RAM contents),
   `LOAD"$",8` and the `FILE NOT FOUND` path.
 - Full-machine: KERNAL cold boot to `READY.`, `PRINT 6*7` typed through the
-  keyboard matrix, `example.prg`, `1942.d64`, and the `.crt` fixtures.
+  keyboard matrix, key taps shorter than a frame typed through `queue_key`,
+  RUN/STOP+RESTORE, `example.prg`, `1942.d64`, and the `.crt` fixtures.
 
 A green build proves nothing on its own — run `.\dd.ps1 test --label lib8bit`
 and check for `FAIL` lines. Smoke-test `app/` changes by launching the app; the

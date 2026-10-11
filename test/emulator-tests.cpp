@@ -15,14 +15,16 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <iostream>#include <string>
-#ifdef _MSC_VER
-#include <crtdbg.h>
-#include <cstdlib>
-#endif#include <string>
+#include <iostream>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#ifdef _MSC_VER
+#include <crtdbg.h>
+#include <cstdlib>
+#endif
 
 namespace
 {
@@ -988,6 +990,58 @@ int main(const int argc, char** argv)
 			"keyboard matrix types through the kernal scan");
 	}
 
+	// A host's key press and release can both arrive between two exec() calls
+	// (a frame is emulated in a burst of about a millisecond). queue_key holds
+	// each change for a whole exec(), so instant taps - a doubled letter and a
+	// shifted key among them - type intact, and nothing is left held.
+	{
+		constexpr int frame = 63 * 312;
+		machine taps;
+		tests.check(run_until_screen_contains(taps, "READY.", boot_cycle_limit), "boots for key-tap test");
+		const auto tap = [&](const int row, const int col) {
+			taps.queue_key(row, col, true);
+			taps.queue_key(row, col, false);
+		};
+		tap(5, 2);                  // L
+		tap(5, 2);                  // L
+		tap(4, 6);                  // O
+		taps.queue_key(1, 7, true); // SHIFT + 2 is a quote
+		tap(7, 3);
+		taps.queue_key(1, 7, false);
+		for (int i = 0; i < 25; ++i) taps.exec(frame);
+		tests.check(screen_contains(taps, "LLO\""), "queued key taps shorter than a frame all type");
+		tests.check(std::all_of(std::begin(taps._state->key_matrix), std::end(taps._state->key_matrix),
+			[](const uint8_t row) { return row == 0xFF; }), "queued key taps leave no key held");
+
+		taps.queue_key(7, 6, true); // Q, dropped before any exec() can apply it
+		taps.clear_keys();
+		for (int i = 0; i < 25; ++i) taps.exec(frame);
+		tests.check(!screen_contains(taps, "Q"), "clear_keys drops queued key changes");
+	}
+
+	// RESTORE pulses NMI. Alone, the KERNAL's handler just returns; with RUN/STOP
+	// held it warm-starts: the screen is cleared and the VIC set up again, so the
+	// black border the program asked for goes back to light blue.
+	{
+		constexpr int frame = 63 * 312;
+		machine nmi;
+		tests.check(run_until_screen_contains(nmi, "READY.", boot_cycle_limit), "boots for RESTORE test");
+		type_line(nmi, "POKE 53280,0");
+		for (int i = 0; i < 25; ++i) nmi.exec(frame);
+		const auto border = [&] { return nmi._state->RAM[0xD020] & 0x0F; };
+
+		nmi.press_restore();
+		for (int i = 0; i < 25; ++i) nmi.exec(frame);
+		tests.check(border() == 0 && screen_contains(nmi, "POKE"), "RESTORE alone leaves the program alone");
+
+		nmi.queue_key(7, 7, true); // RUN/STOP, held as RESTORE goes down
+		nmi.press_restore();
+		nmi.queue_key(7, 7, false);
+		for (int i = 0; i < 25; ++i) nmi.exec(frame);
+		tests.check(border() == 14 && !screen_contains(nmi, "POKE") && screen_contains(nmi, "READY."),
+			"RUN/STOP+RESTORE warm-starts BASIC");
+	}
+
 	// VIC-II frame buffer rendering: boot with rendering on and confirm the
 	// renderer produces a real picture (border around a background screen with
 	// text pixels), not a blank buffer.
@@ -1047,6 +1101,22 @@ int main(const int argc, char** argv)
 	tests.check(loaded, "loads example.prg");
 	tests.check(run_until_screen_contains(prg_machine, "HELLO WORLD", command_cycle_limit), "runs example.prg");
 
+	// is_prg is load_prg's own acceptance test, so a host can reject a file before
+	// it resets the machine to load it.
+	{
+		const uint8_t address_only[] = {0x01, 0x08};
+		const uint8_t fits_exactly[] = {0xFF, 0xFF, 0x60};
+		const uint8_t runs_past_end[] = {0xFF, 0xFF, 0x60, 0x60};
+		tests.check(machine::is_prg(prg.data(), prg.size()), "is_prg accepts example.prg");
+		tests.check(!machine::is_prg(address_only, sizeof(address_only)),
+			"is_prg rejects a load address with no data");
+		tests.check(machine::is_prg(fits_exactly, sizeof(fits_exactly))
+			&& !machine::is_prg(runs_past_end, sizeof(runs_past_end)),
+			"is_prg rejects only a program that runs past $FFFF");
+		tests.check(!prg_machine.load_prg(runs_past_end, sizeof(runs_past_end)),
+			"load_prg rejects what is_prg rejects");
+	}
+
 	for (const auto name : {"gng_bl.crt", "pitfall.crt", "river_raid.crt"})
 	{
 		const auto crt = read_file(fixture_folder / name);
@@ -1099,6 +1169,25 @@ int main(const int argc, char** argv)
 				"banking cartridge ROM out reveals the RAM underneath");
 			tests.check(cart_machine._state->ram_read(0x8000) == rom_byte,
 				"banking cartridge ROM back in restores it");
+		}
+	}
+
+	// A malformed image is rejected without side effects: the inserted cartridge
+	// stays mapped, so the program running from it keeps running.
+	{
+		const auto crt = read_file(fixture_folder / "pitfall.crt");
+		machine cart_machine;
+		if (cart_machine.load_crt(crt.data(), crt.size()))
+		{
+			const auto rom_byte = cart_machine._state->ram_read(0x8000);
+			const auto pc = cart_machine._state->cpu.pc;
+			auto truncated = crt;
+			truncated.resize(0x40); // a valid header, but no CHIP packets
+			tests.check(!cart_machine.load_crt(truncated.data(), truncated.size()),
+				"a CRT with no ROM is rejected");
+			tests.check(cart_machine._state->ram_read(0x8000) == rom_byte
+				&& cart_machine._state->cpu.pc == pc,
+				"a rejected CRT leaves the inserted cartridge running");
 		}
 	}
 
