@@ -116,6 +116,10 @@ namespace
 	std::mutex g_machine_mutex;                     // guards every g_machine access
 	std::atomic<arrow_mode> g_arrow_mode{arrow_mode::cursor};
 	std::atomic<uint8_t> g_joystick{0};
+	// Directions and fire pressed since the emulation thread last read the
+	// joystick, so a tap shorter than a frame still reaches the game, as
+	// machine::queue_key does for the keyboard.
+	std::atomic<uint8_t> g_joystick_taps{0};
 	std::atomic<bool> g_paused{false};
 	std::atomic<bool> g_show_debug{false};
 	std::atomic<bool> g_sid_playing{false};
@@ -540,6 +544,16 @@ namespace
 		return name;
 	}
 
+	// A PRG has no signature, so a file is only taken for one when its name says
+	// so, or says nothing (a file extracted from a disk image under its CBM name).
+	// Otherwise a stray .txt, .nfo or tape image would reset the machine to "run".
+	bool named_like_prg(const wchar_t* path)
+	{
+		const std::wstring name = file_name(path);
+		const size_t dot = name.rfind(L'.');
+		return dot == std::wstring::npos || _wcsicmp(name.c_str() + dot, L".prg") == 0;
+	}
+
 	void load_file(const wchar_t* path, HWND hwnd)
 	{
 		const auto bytes = read_file(path);
@@ -551,19 +565,17 @@ namespace
 
 		// Decide the outcome under the lock and report it after releasing it:
 		// MessageBoxW takes focus, which sends WM_KILLFOCUS to this same thread,
-		// and that handler takes the same non-recursive mutex.
+		// and that handler takes the same non-recursive mutex. A file that is
+		// rejected leaves the machine, and whatever it is running, untouched.
 		const wchar_t* error = nullptr;
 		bool loaded = false;
 		bool cart = g_cart_inserted;
 		bool disk = g_disk_inserted;
 		{
 			std::lock_guard<std::mutex> lk(g_machine_mutex);
-			g_media_generation.fetch_add(1);
-			g_sid_playing.store(false);
 			if (is_sid(bytes))
 			{
 				loaded = g_machine.load_sid(bytes.data(), bytes.size());
-				g_sid_playing.store(loaded);
 				if (!loaded) error = L"Not a valid SID file.";
 			}
 			else if (is_crt(bytes))
@@ -588,6 +600,14 @@ namespace
 				else if (!g_machine.load_prg(prg.data(), prg.size()))
 					error = L"The program on this disk could not be started.";
 			}
+			else if (!named_like_prg(path))
+			{
+				error = L"Not a C64 program, cartridge, SID tune or disk image.";
+			}
+			else if (!machine::is_prg(bytes.data(), bytes.size()))
+			{
+				error = L"Not a valid PRG file.";
+			}
 			else
 			{
 				// Treat as a .PRG: reset, run the kernal to READY, then inject + RUN.
@@ -597,9 +617,17 @@ namespace
 				if (!loaded) error = L"Not a valid PRG file.";
 			}
 
-			// reset() zeroes the SID audio clock; re-sync it to "now" so the next
-			// frame renders one frame of samples rather than a huge backlog.
-			g_machine.set_audio_enabled(true);
+			if (loaded)
+			{
+				// A stop the emulation thread posts for the previous medium no longer
+				// applies, and only a tune that is now playing can post one.
+				g_media_generation.fetch_add(1);
+				g_sid_playing.store(g_machine.sid_player_active());
+
+				// reset() zeroes the SID audio clock; re-sync it to "now" so the next
+				// frame renders one frame of samples rather than a huge backlog.
+				g_machine.set_audio_enabled(true);
+			}
 		}
 
 		if (loaded)
@@ -617,7 +645,11 @@ namespace
 	void set_arrow_mode(HWND hwnd, arrow_mode mode)
 	{
 		g_arrow_mode.store(mode);
-		if (mode == arrow_mode::cursor) g_joystick.store(0);
+		if (mode == arrow_mode::cursor)
+		{
+			g_joystick.store(0);
+			g_joystick_taps.store(0);
+		}
 		refresh_menu(hwnd);
 		update_title();
 	}
@@ -634,7 +666,7 @@ namespace
 			return;
 		}
 
-		const uint8_t bits = g_joystick.load();
+		const uint8_t bits = g_joystick.load() | g_joystick_taps.exchange(0);
 		const int port = mode == arrow_mode::joystick1 ? 1 : 2;
 		const int other = port == 1 ? 2 : 1;
 		g_machine.set_joystick(port, (bits & kJoyUp) != 0, (bits & kJoyDown) != 0,
@@ -766,13 +798,19 @@ namespace
 		}
 	}
 
+	// Clipped to the back buffer: when the client is smaller than the picture the
+	// letterbox arithmetic produces bands that start above or end below it.
 	void fill_rect(int x, int y, int w, int h, uint32_t colour)
 	{
-		if (w <= 0 || h <= 0) return;
-		for (int row = 0; row < h; row++)
+		const int left = std::max(x, 0);
+		const int top = std::max(y, 0);
+		const int right = std::min(x + w, g_back_w);
+		const int bottom = std::min(y + h, g_back_h);
+		if (right <= left || bottom <= top) return;
+		for (int row = top; row < bottom; row++)
 		{
-			uint32_t* const p = g_back_bits + static_cast<size_t>(y + row) * g_back_w + x;
-			std::fill(p, p + w, colour);
+			uint32_t* const p = g_back_bits + static_cast<size_t>(row) * g_back_w + left;
+			std::fill(p, p + (right - left), colour);
 		}
 	}
 
@@ -936,8 +974,11 @@ namespace
 
 		w.blank();
 		w.line(head, "HOST");
-		w.line(emulated_fps < 48 ? mark : text, "EMULATION %d FPS (%d%%)",
-			emulated_fps, emulated_fps * 2);
+		if (emulated_fps < 0)
+			w.line(text, "EMULATION PAUSED");
+		else
+			w.line(emulated_fps < 48 ? mark : text, "EMULATION %d FPS (%d%%)",
+				emulated_fps, emulated_fps * 2);
 	}
 
 	void draw_debug_panel(int left, int top, int right, int bottom, int scale,
@@ -960,31 +1001,49 @@ namespace
 	int text_scale() { return std::max(2, g_dpi * 2 / 96); }
 	int default_panel_width() { return 31 * 8 * text_scale() + 4 * text_scale(); }
 
+	// The panel width for a client this wide: the user's width, narrowed so the
+	// picture always keeps room for 1x (dragging can never hide it) and widened to
+	// what the text needs. The user's width itself is left alone, so a window
+	// that shrinks and grows back gets it back.
+	int panel_width(int client_w)
+	{
+		const int max_w = std::max(0, client_w - splitter_width() - kFramebufferW);
+		const int min_w = std::min(default_panel_width(), max_w);
+		return std::clamp(g_panel_w, min_w, max_w);
+	}
+
 	// x of the splitter's left edge, or -1 when the panel is hidden or would not fit.
 	int splitter_x(int client_w)
 	{
 		if (!g_show_debug.load()) return -1;
-		const int x = client_w - g_panel_w - splitter_width();
+		const int x = client_w - panel_width(client_w) - splitter_width();
 		return x >= 0 ? x : -1;
 	}
 
-	void clamp_panel(int client_w)
-	{
-		// Always leave room for the picture at 1x, so dragging can never hide it.
-		const int max_w = std::max(0, client_w - splitter_width() - kFramebufferW);
-		const int min_w = std::min(default_panel_width(), max_w); // the width the text needs
-		g_panel_w = std::clamp(g_panel_w, min_w, max_w);
-	}
-
-	// Emulated frames per second, sampled over the last half second. A tune that
-	// drifts below 50 is the emulator being paced slower than real time.
+	// Emulated frames per second, sampled over the last half second, or -1 while
+	// paused. A tune that drifts below 50 is the emulator being paced slower than
+	// real time.
 	int emulated_fps()
 	{
 		static auto last_time = std::chrono::steady_clock::now();
 		static int64_t last_frames = 0;
 		static int value = 50;
+		static bool was_paused = false;
 
 		const auto now = std::chrono::steady_clock::now();
+		if (g_paused.load())
+		{
+			was_paused = true;
+			return -1;
+		}
+		if (was_paused)
+		{
+			// Start the next sample at the resume, so it does not average the pause in.
+			was_paused = false;
+			last_frames = g_emu_frames.load(std::memory_order_relaxed);
+			last_time = now;
+		}
+
 		const auto elapsed = std::chrono::duration<double>(now - last_time).count();
 		if (elapsed >= 0.5)
 		{
@@ -1025,8 +1084,6 @@ namespace
 		}
 		const frame& current = g_frames[g_frame_read];
 
-		const bool want_debug = g_show_debug.load();
-		if (want_debug) clamp_panel(cw);
 		const int split = splitter_x(cw);
 		const bool debug = split >= 0;
 		const int picture_w = debug ? split : cw;
@@ -1108,6 +1165,15 @@ namespace
 		case VK_OEM_PLUS: return one(5, 0);    // + / =
 		case VK_OEM_3: return one(7, 1);       // ` -> left-arrow
 
+		// The C64 keys with no PC key of their own, where VICE's positional map
+		// puts them; ' takes the colon because ; is already the C64 semicolon.
+		case VK_OEM_7: return one(5, 5);       // ' -> :
+		case VK_OEM_4: return one(5, 6);       // [ -> @
+		case VK_OEM_6: return one(6, 1);       // ] -> *
+		case VK_OEM_5: return one(6, 6);       // \ -> up-arrow
+		case VK_NEXT: return one(6, 5);        // Page Down -> =
+		case VK_END: return one(6, 0);         // End -> pound
+
 		case VK_RETURN: return one(0, 1);
 		case VK_SPACE: return one(7, 4);
 		case VK_BACK: return one(0, 0);        // INST/DEL
@@ -1132,6 +1198,24 @@ namespace
 		}
 	}
 
+	// UI thread. A frame is emulated in a burst of about a millisecond, so a key
+	// written straight to the matrix and released before the next burst would
+	// never be scanned - every key the On-Screen Keyboard, dictation or a macro
+	// tool types. Queued, each change lasts a frame. While paused nothing drains
+	// the queue, so a change is made at once, after any still queued.
+	void send_keys(const keypos* pos, int count, bool pressed)
+	{
+		if (count <= 0) return;
+		std::lock_guard<std::mutex> lk(g_machine_mutex);
+		const bool now = g_paused.load();
+		if (now) g_machine.flush_keys();
+		for (int i = 0; i < count; ++i)
+		{
+			if (now) g_machine.set_key(pos[i].row, pos[i].col, pressed);
+			else g_machine.queue_key(pos[i].row, pos[i].col, pressed);
+		}
+	}
+
 	// Stops the worker threads. Called from WM_CLOSE so neither thread can touch
 	// the window after it is destroyed, and again from WinMain as a backstop.
 	void shutdown_workers()
@@ -1145,6 +1229,7 @@ namespace
 	void release_all_keys()
 	{
 		g_joystick.store(0);
+		g_joystick_taps.store(0);
 		std::lock_guard<std::mutex> lk(g_machine_mutex);
 		g_machine.clear_keys();
 	}
@@ -1180,6 +1265,19 @@ namespace
 			SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
 				suggested->right - suggested->left, suggested->bottom - suggested->top,
 				SWP_NOZORDER | SWP_NOACTIVATE);
+			return 0;
+		}
+
+		case WM_GETMINMAXINFO:
+		{
+			// Never smaller than the picture at 1x, with room for the splitter so
+			// showing the debug panel cannot squeeze the picture out either: below
+			// that paint has nowhere to put it.
+			RECT r{0, 0, kFramebufferW + splitter_width(), kFramebufferH};
+			AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, TRUE, 0, GetDpiForWindow(hwnd));
+			auto* const info = reinterpret_cast<MINMAXINFO*>(lparam);
+			info->ptMinTrackSize.x = r.right - r.left;
+			info->ptMinTrackSize.y = r.bottom - r.top;
 			return 0;
 		}
 
@@ -1220,7 +1318,7 @@ namespace
 				RECT client;
 				GetClientRect(hwnd, &client);
 				g_panel_w = client.right - GET_X_LPARAM(lparam) - splitter_width();
-				clamp_panel(client.right);
+				g_panel_w = panel_width(client.right);
 				InvalidateRect(hwnd, nullptr, FALSE);
 			}
 			return 0;
@@ -1245,6 +1343,18 @@ namespace
 		{
 			const bool pressed = msg == WM_KEYDOWN;
 
+			// RESTORE is not in the matrix: pressing it pulses NMI, once, so the
+			// key's auto-repeat is ignored and its release does nothing.
+			if (wparam == VK_PRIOR)
+			{
+				if (pressed && !(lparam & (1 << 30)))
+				{
+					std::lock_guard<std::mutex> lk(g_machine_mutex);
+					g_machine.press_restore();
+				}
+				return 0;
+			}
+
 			// In joystick mode the arrows drive the joystick instead of the C64
 			// cursor keys. Space is shared: it fires *and* still reaches the matrix,
 			// so the mode never silently swallows the space bar.
@@ -1263,20 +1373,19 @@ namespace
 
 				if (bit)
 				{
-					if (pressed) g_joystick.fetch_or(bit);
+					if (pressed)
+					{
+						g_joystick.fetch_or(bit);
+						// Nothing reads the joystick while paused, as nothing scans the keys.
+						if (!g_paused.load()) g_joystick_taps.fetch_or(bit);
+					}
 					else g_joystick.fetch_and(static_cast<uint8_t>(~bit));
 					if (wparam != VK_SPACE) return 0;
 				}
 			}
 
 			keypos pos[2];
-			const int count = map_key(wparam, pos);
-			if (count > 0)
-			{
-				std::lock_guard<std::mutex> lk(g_machine_mutex);
-				for (int i = 0; i < count; ++i)
-					g_machine.set_key(pos[i].row, pos[i].col, pressed);
-			}
+			send_keys(pos, map_key(wparam, pos), pressed);
 			return 0;
 		}
 
@@ -1348,6 +1457,7 @@ namespace
 				g_paused.store(!g_paused.load());
 				refresh_menu(hwnd);
 				update_title();
+				InvalidateRect(hwnd, nullptr, FALSE); // the emulation thread stops repainting
 				break;
 			case kCmdDebug:
 				g_show_debug.store(!g_show_debug.load());
@@ -1361,19 +1471,26 @@ namespace
 			case kCmdKeyboard:
 				MessageBoxW(hwnd,
 					L"Emulated C64 keys\n\n"
+					L"Keys are mapped by position, so Shift types the C64's own shifted "
+					L"symbols: Shift+2 for a quote, Shift+8 and Shift+9 for brackets.\n\n"
 					L"Esc\t\tRUN/STOP\n"
+					L"Page Up\t\tRESTORE (with Esc held: RUN/STOP+RESTORE)\n"
 					L"Tab\t\tCommodore key\n"
 					L"` (backtick)\tLeft arrow\n"
 					L"Home\t\tCLR/HOME\n"
 					L"Backspace, Delete\tINST/DEL\n"
+					L"' (quote)\t\t:\n"
+					L"[  ]\t\t@  *\n"
+					L"\\ (backslash)\tUp arrow\n"
+					L"Page Down\t=\n"
+					L"End\t\t\u00A3 (pound)\n"
 					L"F1 - F8\t\tC64 function keys\n"
-					L"Arrow keys\tC64 cursor keys, or the joystick when the Input "
-					L"menu selects one\n"
+					L"Arrow keys\tCursor keys, or the Input menu's joystick\n"
 					L"Space\t\tSpace bar, and joystick fire in joystick mode\n\n"
 					L"Host shortcuts\n\n"
 					L"Ctrl+O\t\tOpen a file\n"
 					L"Ctrl+R\t\tReset (the cartridge stays inserted)\n"
-					L"Ctrl+E\t\tEject cartridge\n"
+					L"Ctrl+E\t\tEject media\n"
 					L"F9\t\tPause / resume\n"
 					L"F11\t\tShow / hide the debug panel\n"
 					L"F12\t\tAbout",
