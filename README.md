@@ -9,6 +9,10 @@ The library is platform independent and does no file I/O — the host supplies
 bytes, the library returns a frame buffer and audio samples. It is intended for
 embedding in applications such as Diffractor to add retro computer support.
 
+![lib8bit Windows host running a Commodore 64 BASIC demonstration](docs/screenshot.png)
+
+*An original BASIC sample running in the emulator.*
+
 Repository: <https://github.com/ZacWalk/lib8bit>
 
 ## What is emulated
