@@ -9,6 +9,8 @@
 #include "machine.h"
 #include "vic.h"
 
+#include <cstring>
+
 const uint32_t vic_palette[16] = {
 	0x000000, 0xFFFFFF, 0x68372B, 0x70A4B2,
 	0x6F3D86, 0x588D43, 0x352879, 0xB8C76F,
@@ -41,6 +43,7 @@ namespace
 		int screen_addr;
 		int char_addr;
 		int bitmap_addr;
+		int char_rom_offset;
 		bool use_char_rom;
 	};
 
@@ -52,7 +55,7 @@ namespace
 		const bool bmm = (ctrl1 & 0x20) != 0;
 		const bool mcm = (ctrl2 & 0x10) != 0;
 
-		if (ecm && bmm) return MODE_INVALID;
+		if (ecm && (bmm || mcm)) return MODE_INVALID;
 		if (bmm && mcm) return MODE_MULTICOLOR_BITMAP;
 		if (bmm) return MODE_STANDARD_BITMAP;
 		if (ecm) return MODE_EXTENDED_BACKGROUND;
@@ -62,8 +65,10 @@ namespace
 
 	mem_addrs get_mem_addrs(const uint8_t* ram)
 	{
-		// VIC bank from CIA2 $DD00 (bits 0-1, inverted).
-		const int cia2_port_a = ram[0xDD00];
+		// VIC bank from CIA2 $DD00 (bits 0-1, inverted). Port A lines set to input
+		// float high, which is why a machine that has not programmed the DDR yet
+		// (a bare reset) sees bank 0.
+		const int cia2_port_a = (ram[0xDD00] & ram[0xDD02]) | (0xFF & ~ram[0xDD02]);
 		const int vic_bank_num = (~cia2_port_a) & 0x03;
 		const int vic_bank = vic_bank_num * 0x4000;
 
@@ -73,11 +78,12 @@ namespace
 		const int char_addr = vic_bank + char_offset;
 		const int bitmap_addr = vic_bank + ((mem_ctrl & 0x08) ? 0x2000 : 0x0000);
 
-		// Character ROM appears to the VIC at $1000-$1FFF within banks 0 and 2.
+		// Character ROM appears to the VIC at $1000-$1FFF within banks 0 and 2; the
+		// lower-case set is the second half of the 4 KB ROM.
 		const bool use_char_rom = (vic_bank_num == 0 || vic_bank_num == 2) &&
 			(char_offset == 0x1000 || char_offset == 0x1800);
 
-		return {vic_bank, screen_addr, char_addr, bitmap_addr, use_char_rom};
+		return {vic_bank, screen_addr, char_addr, bitmap_addr, char_offset & 0x0800, use_char_rom};
 	}
 
 	void render_standard_character(uint32_t* fb, uint8_t* fgmask, const uint8_t* ram, int canvas_y,
@@ -90,7 +96,7 @@ namespace
 			const uint32_t color = vic_palette[ram[COLOR_RAM + char_row * 40 + c] & 0x0F];
 			const int glyph = char_code * 8;
 			const uint8_t line = ma.use_char_rom
-				? rom_chars[glyph + char_pixel_y]
+				? rom_chars[ma.char_rom_offset + glyph + char_pixel_y]
 				: ram[ma.char_addr + glyph + char_pixel_y];
 
 			for (int cx = 0; cx < 8; cx++)
@@ -124,7 +130,7 @@ namespace
 			const int fg = color_ram & 0x07;
 			const int glyph = char_code * 8;
 			const uint8_t line = ma.use_char_rom
-				? rom_chars[glyph + char_pixel_y]
+				? rom_chars[ma.char_rom_offset + glyph + char_pixel_y]
 				: ram[ma.char_addr + glyph + char_pixel_y];
 
 			if (is_mc)
@@ -250,7 +256,7 @@ namespace
 			const uint32_t fg = vic_palette[ram[COLOR_RAM + char_row * 40 + c] & 0x0F];
 			const int glyph = actual * 8;
 			const uint8_t line = ma.use_char_rom
-				? rom_chars[glyph + char_pixel_y]
+				? rom_chars[ma.char_rom_offset + glyph + char_pixel_y]
 				: ram[ma.char_addr + glyph + char_pixel_y];
 
 			for (int cx = 0; cx < 8; cx++)
@@ -273,7 +279,7 @@ namespace
 		if (sprite_enable == 0) return;
 
 		int8_t* collision = s->sprite_collision;
-		for (int i = 0; i < VIC_FB_WIDTH; i++) collision[i] = -1;
+		std::memset(collision, 0xFF, VIC_FB_WIDTH);
 
 		const uint8_t x_expand = ram[0xD01D];
 		const uint8_t y_expand = ram[0xD017];
@@ -284,6 +290,12 @@ namespace
 		const int sprite_ptr_base = ma.screen_addr + 0x03F8;
 		const uint8_t* fgmask = s->fg_mask;
 		const int row_offset = canvas_y * VIC_FB_WIDTH;
+
+		// A collision latches even when the sprite is drawn behind the graphics, so
+		// compare the registers either side of the whole scanline and raise the
+		// interrupt once rather than per pixel.
+		const uint8_t sprite_sprite_before = ram[0xD01E];
+		const uint8_t sprite_bg_before = ram[0xD01F];
 
 		// Render 7..0 so lower-numbered sprites end up on top.
 		for (int sprite = 7; sprite >= 0; sprite--)
@@ -307,6 +319,7 @@ namespace
 			const bool is_mc = (multicolor & (1 << sprite)) != 0;
 			const bool x_exp = (x_expand & (1 << sprite)) != 0;
 			const bool behind = (priority & (1 << sprite)) != 0;
+			const int x_step = x_exp ? 2 : 1;
 
 			for (int byte_col = 0; byte_col < 3; byte_col++)
 			{
@@ -325,8 +338,8 @@ namespace
 						case 2: pixel_color = sprite_color; break;
 						case 3: pixel_color = mc1; break;
 						}
-						const int base_x = sprite_x + byte_col * 8 + pair * 2;
-						const int width = x_exp ? 4 : 2;
+						const int base_x = sprite_x + (byte_col * 8 + pair * 2) * x_step;
+						const int width = 2 * x_step;
 						for (int dx = 0; dx < width; dx++)
 						{
 							const int px = base_x + dx;
@@ -345,11 +358,10 @@ namespace
 					for (int bit = 0; bit < 8; bit++)
 					{
 						if (!(data & (0x80 >> bit))) continue;
-						const int base_x = sprite_x + byte_col * 8 + bit;
-						const int width = x_exp ? 2 : 1;
-						for (int dx = 0; dx < width; dx++)
+						const int base_x = sprite_x + (byte_col * 8 + bit) * x_step;
+						for (int dx = 0; dx < x_step; dx++)
 						{
-							const int px = base_x + (x_exp ? dx : 0);
+							const int px = base_x + dx;
 							if (px < 0 || px >= VIC_FB_WIDTH) continue;
 							const int other = collision[px];
 							if (other != -1) ram[0xD01E] |= (1 << sprite) | (1 << other);
@@ -361,6 +373,15 @@ namespace
 					}
 				}
 			}
+		}
+
+		uint8_t latched = 0;
+		if (ram[0xD01E] != sprite_sprite_before) latched |= 0x02; // $D019 sprite-sprite
+		if (ram[0xD01F] != sprite_bg_before) latched |= 0x04;     // $D019 sprite-background
+		if (latched)
+		{
+			s->vic.irq_status |= latched;
+			s->update_vic_irq();
 		}
 	}
 }
@@ -375,7 +396,10 @@ void vic_render_scanline(machine_state* s, const int raster_line)
 
 	const uint32_t border_color = vic_palette[ram[0xD020] & 0x0F];
 	const uint32_t bg_color = vic_palette[ram[0xD021] & 0x0F];
-	const bool in_screen_y = canvas_y >= BORDER_Y && canvas_y < (BORDER_Y + SCREEN_H);
+	// DEN ($D011 bit 4) off blanks the display window down to border colour.
+	const bool display_enabled = (ram[VIC_CTRL1] & 0x10) != 0;
+	const bool in_screen_y = display_enabled &&
+		canvas_y >= BORDER_Y && canvas_y < (BORDER_Y + SCREEN_H);
 
 	const int row_offset = canvas_y * VIC_FB_WIDTH;
 	for (int x = 0; x < VIC_FB_WIDTH; x++)
@@ -397,7 +421,9 @@ void vic_render_scanline(machine_state* s, const int raster_line)
 	const int screen_y = canvas_y - BORDER_Y; // 0-199
 	if (!rsel && (screen_y < 4 || screen_y >= 196)) return; // 24-row border mask
 
-	const int adjusted_y = screen_y - yscroll;
+	// YSCROLL 3 is the neutral position: the first badline is raster 0x30+YSCROLL,
+	// so the KERNAL default of 3 starts screen row 0 at the top of the window.
+	const int adjusted_y = screen_y - (yscroll - 3);
 	if (adjusted_y < 0 || adjusted_y >= 200) return;
 
 	const int char_row = adjusted_y >> 3;

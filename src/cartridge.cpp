@@ -7,6 +7,7 @@
 #include "cartridge.h"
 
 #include <cstring>
+#include <utility>
 
 namespace
 {
@@ -20,11 +21,24 @@ namespace
 		return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
 			(static_cast<uint32_t>(p[2]) << 8) | p[3];
 	}
+
+	// Sanity cap so a malformed .crt cannot drive unbounded allocation.
+	constexpr size_t max_banks = 512;
 }
 
 bool cartridge::load(const uint8_t* bytes, const size_t length)
 {
-	eject();
+	// Parse into a fresh cartridge and adopt it only once it is valid: a malformed
+	// image must leave the inserted cartridge, and the program running from it,
+	// untouched.
+	cartridge parsed;
+	if (!parsed.parse(bytes, length)) return false;
+	*this = std::move(parsed);
+	return true;
+}
+
+bool cartridge::parse(const uint8_t* bytes, const size_t length)
+{
 	if (!bytes || length < 0x40) return false;
 
 	if (std::memcmp(bytes, "C64 CARTRIDGE   ", 16) != 0) return false;
@@ -47,9 +61,10 @@ bool cartridge::load(const uint8_t* bytes, const size_t length)
 	}
 
 	banks.clear();
-	size_t offset = header_length;
-	while (offset + 16 <= length)
+	size_t offset = header_length; // <= length, and every accepted packet keeps it so
+	while (length - offset >= 16)
 	{
+		if (banks.size() >= max_banks) break;
 		if (std::memcmp(bytes + offset, "CHIP", 4) != 0) break;
 
 		const uint32_t packet_length = be32(bytes + offset + 4);
@@ -58,7 +73,10 @@ bool cartridge::load(const uint8_t* bytes, const size_t length)
 		const uint16_t rom_size = be16(bytes + offset + 14);
 
 		if (rom_size == 0 || rom_size > 0x4000) break;
-		if (packet_length < 16u + rom_size || offset + packet_length > length) break;
+		// Compare by subtraction: offset + packet_length wraps where size_t is 32-bit.
+		// Passing both tests gives 16 + rom_size <= packet_length <= length - offset,
+		// so the payload is in bounds and offset always advances by at least 17.
+		if (packet_length < 16u + rom_size || packet_length > length - offset) break;
 
 		chip_bank bank;
 		bank.bank_number = bank_number;

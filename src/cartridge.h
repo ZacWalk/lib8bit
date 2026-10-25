@@ -52,7 +52,8 @@ public:
 	int exrom = 1; // /EXROM line, active low (0 = asserted)
 	int game = 1;  // /GAME line, active low (0 = asserted)
 
-	// Parse a .CRT image. Returns false on a malformed file.
+	// Parse a .CRT image. Returns false on a malformed file, leaving the
+	// cartridge as it was.
 	bool load(const uint8_t* bytes, size_t length);
 	void reset();
 	void eject();
@@ -83,6 +84,7 @@ private:
 	std::vector<uint8_t> easyflash_ram;
 	uint8_t easyflash_control = 0;
 
+	bool parse(const uint8_t* bytes, size_t length);
 	void update_bank_mapping();
 	void get_mem_config(int& roml_addr, int& romh_addr) const;
 };
