@@ -202,7 +202,7 @@ bool cartridge::read(const uint16_t addr, uint8_t& out) const
 				if (off < b.size) { out = b.data[off]; return true; }
 			}
 		}
-		else if (romh_addr == 0xE000 && addr >= 0xE000 && addr <= 0xFFFF)
+		else if (romh_addr == 0xE000 && addr >= 0xE000)
 		{
 			const int off = addr - 0xE000;
 			if (off < b.size) { out = b.data[off]; return true; }

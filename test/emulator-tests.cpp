@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -23,7 +24,6 @@
 
 #ifdef _MSC_VER
 #include <crtdbg.h>
-#include <cstdlib>
 #endif
 
 namespace
@@ -1316,6 +1316,109 @@ int main(const int argc, char** argv)
 		tune.set_key(2, 7, true);
 		tune.exec(20'000);
 		tests.check(!tune.sid_player_active(), "X stops the SID player");
+	}
+
+	// A tune's header read without loading it - what a host lists or indexes a
+	// tune by - and the same validation load_sid() applies.
+	{
+		sid_tune_info info;
+		const auto cybernoid = read_file(fixture_folder / "cybernoid.sid");
+		tests.check(machine::parse_sid(cybernoid.data(), cybernoid.size(), info), "parse_sid reads a PSID header");
+		tests.check(std::string_view(info.title) == "Cybernoid" && std::string_view(info.author) == "Jeroen Tel"
+				&& std::string_view(info.released) == "1988 Hewson",
+			"parse_sid reads the title, author and release");
+		tests.check(!info.rsid && info.version == 2 && info.songs == 2 && info.start_song == 1,
+			"parse_sid reads the format, sub-tune count and start tune");
+		tests.check(info.load_address == 0xAE00 && info.init_address == 0xAE00 && info.play_address == 0xAE06,
+			"parse_sid resolves the embedded load address and a zero init address");
+		tests.check(!info.chip_8580 && !info.ntsc, "parse_sid reads the 6581 and PAL flags");
+
+		sid_tune_info ninja;
+		const auto last_ninja = read_file(fixture_folder / "last_ninja.sid");
+		tests.check(machine::parse_sid(last_ninja.data(), last_ninja.size(), ninja)
+				&& ninja.songs == 11 && ninja.start_song == 3
+				&& ninja.load_address == 0x2000 && ninja.init_address == 0x2003 && ninja.play_address == 0x2000,
+			"parse_sid reads a tune that starts on a later sub-tune");
+
+		sid_tune_info giana;
+		const auto ggs = read_file(fixture_folder / "ggs.sid");
+		tests.check(machine::parse_sid(ggs.data(), ggs.size(), giana) && giana.rsid && giana.songs == 23,
+			"parse_sid reads an RSID header");
+
+		std::vector<uint8_t> broken = cybernoid;
+		broken[0] = 'X';
+		sid_tune_info rejected;
+		machine untouched;
+		tests.check(!machine::parse_sid(broken.data(), broken.size(), rejected)
+				&& !untouched.load_sid(broken.data(), broken.size()),
+			"parse_sid and load_sid both refuse a bad magic number");
+		tests.check(!machine::parse_sid(cybernoid.data(), 0x7B, rejected), "parse_sid refuses a truncated header");
+	}
+
+	// The SID monitor hooks: register writes are counted, envelopes are live while
+	// audio runs, and a muted voice leaves the mix but keeps running.
+	{
+		const auto tune_bytes = read_file(fixture_folder / "cybernoid.sid");
+		auto render = [&](machine& m, const int frames)
+		{
+			std::vector<int16_t> pcm;
+			int16_t buffer[4096];
+			for (int frame = 0; frame < frames; ++frame)
+			{
+				m.exec(pal_cycles_per_frame);
+				const int samples = m.generate_audio(buffer, 4096);
+				pcm.insert(pcm.end(), buffer, buffer + samples);
+			}
+			return pcm;
+		};
+
+		machine plain;
+		plain.load_sid(tune_bytes.data(), tune_bytes.size());
+		sid_snapshot before;
+		plain.capture_sid(before);
+		const auto plain_pcm = render(plain, 100);
+		sid_snapshot after;
+		plain.capture_sid(after);
+
+		uint32_t writes = 0;
+		bool envelope_live = false;
+		for (int r = 0; r < 25; ++r) writes += after.writes[r] - before.writes[r];
+		for (int v = 0; v < 3; ++v) envelope_live = envelope_live || after.envelope[v] != 0;
+		tests.check(writes > 100, "capture_sid counts the play routine's register writes");
+		tests.check(envelope_live, "capture_sid reports a sounding voice's envelope level");
+		tests.check(std::equal(after.regs, after.regs + 32, plain._state->sid_regs), "capture_sid copies the register file");
+
+		machine muted;
+		muted.load_sid(tune_bytes.data(), tune_bytes.size());
+		muted.set_sid_voice_muted(0, true);
+		tests.check(muted.sid_voice_muted(0) && !muted.sid_voice_muted(1), "a muted voice reports as muted");
+		const auto muted_pcm = render(muted, 100);
+		tests.check(muted_pcm.size() == plain_pcm.size() && muted_pcm != plain_pcm, "muting a voice changes the output");
+
+		machine silent;
+		silent.load_sid(tune_bytes.data(), tune_bytes.size());
+		for (int v = 0; v < 3; ++v) silent.set_sid_voice_muted(v, true);
+		const auto silent_pcm = render(silent, 100);
+		int peak = 0, plain_peak = 0;
+		for (size_t i = silent_pcm.size() / 2; i < silent_pcm.size(); ++i) peak = std::max(peak, std::abs(static_cast<int>(silent_pcm[i])));
+		for (size_t i = plain_pcm.size() / 2; i < plain_pcm.size(); ++i) plain_peak = std::max(plain_peak, std::abs(static_cast<int>(plain_pcm[i])));
+		tests.check(peak * 20 < plain_peak, "muting every voice silences the tune");
+
+		silent.sid_select_song(2);
+		tests.check(silent.sid_voice_muted(2), "a mute survives a change of sub-tune");
+		silent.set_sid_voice_muted(2, false);
+		tests.check(!silent.sid_voice_muted(2), "a voice can be unmuted");
+	}
+
+	// reset() is a cold start: the KERNAL boots to READY. again and a tune stops.
+	{
+		const auto tune_bytes = read_file(fixture_folder / "cybernoid.sid");
+		machine m;
+		m.load_sid(tune_bytes.data(), tune_bytes.size());
+		m.exec(pal_cycles_per_frame);
+		m.reset();
+		tests.check(!m.sid_player_active(), "reset leaves a playing tune");
+		tests.check(run_until_screen_contains(m, "READY.", boot_cycle_limit), "reset boots the KERNAL to READY.");
 	}
 
 	// Debug snapshot: every addressing mode formats the way a 6502 monitor

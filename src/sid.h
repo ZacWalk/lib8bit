@@ -156,6 +156,10 @@ public:
 	void write_res_filt(uint8_t v);
 	void write_mode_vol(uint8_t v);
 	void enable(bool e);
+	// Voices (bit 0 = voice 1) left out of the mix. reset() keeps the mask: it
+	// is the listener's choice, not chip state.
+	void set_mute_mask(uint8_t mask) { mute_mask = mask & 0x07; }
+	uint8_t get_mute_mask() const { return mute_mask; }
 
 private:
 	int normalized_voice(voice* v) const;
@@ -178,6 +182,7 @@ private:
 	int digi_dc = 0;
 	bool enabled = true;
 	uint8_t filt = 0;
+	uint8_t mute_mask = 0;
 	const float* freq_table = nullptr;
 };
 
@@ -214,6 +219,10 @@ public:
 	// Current envelope level of a voice (0-255), for monitors: the registers are
 	// write-only, so this is the only way to see whether a voice is sounding.
 	uint8_t envelope_level(int v) const { return voices[v & 3].envelope.output(); }
+
+	// Leave a voice (0-2) out of the output while it keeps running; see sid_filter.
+	void set_voice_muted(int v, bool muted);
+	bool voice_muted(int v) const;
 
 	// Frame-boundary hook kept for hosts; clock() drains the write queue itself.
 	void begin_frame() {}

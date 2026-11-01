@@ -52,7 +52,7 @@ namespace
 		};
 
 		disk_geometry geometry;
-		for (const auto [image_size, tracks] : d64_sizes)
+		for (const auto& [image_size, tracks] : d64_sizes)
 			if (size == image_size)
 			{
 				geometry = {

@@ -48,7 +48,7 @@ uint8_t pull8(machine_state* s)
 
 
 //addressing mode functions, calculates effective addresses
-void imp(machine_state* s)
+void imp(machine_state*)
 {
 	//implied
 }
@@ -526,10 +526,6 @@ uint16_t lsr(machine_state* s, const uint16_t value)
 	s->cpu.calc_sign(result);
 
 	return result;
-}
-
-void nop(machine_state* s)
-{
 }
 
 uint16_t ora(machine_state* s, const uint16_t value)

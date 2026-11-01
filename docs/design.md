@@ -9,7 +9,7 @@ Two pieces, with a hard boundary between them:
 
 | | |
 |---|---|
-| `src/` | The emulator. Platform independent: no Windows headers, no file system, no threads. Builds `lib8bit.lib`. |
+| `src/` | The emulator. Platform independent: no Windows headers, no file system, no threads. Builds the `lib8bit` static library with MSVC or GCC. |
 | `app/` | A Win32 host. Owns the window, GDI, waveOut, menus and the settings file. |
 | `test/` | A console harness that drives the library headlessly. |
 
@@ -139,6 +139,20 @@ Input comes from the emulated keyboard matrix, edge-detected against the previou
 frame: `1`-`9` restart the tune on another sub-tune and `X` resets the machine.
 Nothing here is host specific — a host only feeds keys and shows the frame
 buffer, exactly as for any other program.
+
+### Monitor hooks
+
+`capture_sid()` fills a `sid_snapshot` without side effects: the last value the
+CPU wrote to each register, since the chip's registers are write-only; each
+voice's live envelope level, which advances only while audio is generated; and
+per-register write counts that run for the machine's lifetime, so a host diffs
+two snapshots to see what a tune drove in between. `set_sid_voice_muted()`
+drops a voice in `sid_filter::route_voices`, after the voice has still been
+clocked through `output()`, so the waveform generator's state is unchanged and
+unmuting picks it up mid-note. A mute is a listening aid, not chip state: it
+survives `reset()` and a change of tune. `parse_sid()` reads a header through
+the same `read_sid_image()` as `load_sid()`, so the two accept exactly the same
+files.
 
 ## CIA
 

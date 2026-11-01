@@ -39,16 +39,17 @@ clocks.
 
 | Path | Contents |
 |------|----------|
-| `src/` | The emulator. Platform independent — no Windows headers, no file system. Builds `lib8bit.lib`. |
+| `src/` | The emulator. Platform independent — no Windows headers, no file system. Builds the `lib8bit` static library. |
 | `app/` | Win32 test app: GDI video, waveOut audio, menus, drag-and-drop. |
 | `test/` | Command-line behavioural test suite and its fixtures. |
 | `docs/` | [design.md](docs/design.md) (architecture) and [todo.md](docs/todo.md) (gaps). |
 
 ## Build and run
 
-Requires Windows x64 and Visual Studio with the Desktop C++ workload. The
-vendored [dd](https://github.com/ZacWalk/dd) runtime locates Visual Studio and
-uses the CMake and Ninja that ship with it.
+The library and its test suite build on Windows with Visual Studio, x64 and
+x86, and on Linux with GCC 13; the app is Windows-only. On Windows the vendored
+[dd](https://github.com/ZacWalk/dd) runtime locates Visual Studio and uses the
+CMake and Ninja that ship with it.
 
 ```powershell
 .\dd.ps1 build        # both configurations
@@ -56,8 +57,16 @@ uses the CMake and Ninja that ship with it.
 .\dd.ps1 launch       # build Release, then start the Win32 app
 ```
 
+On Linux, with `g++`, `cmake` and `ninja-build` installed:
+
+```bash
+cmake --preset linux-release && cmake --build --preset linux-release
+ctest --preset linux-release     # or pwsh ./dd.ps1 test, for both configurations
+```
+
 The app lands in `bin/` as `app8bit64r.exe` (Release) or `app8bit64d.exe`
-(Debug); the test binary is `lib8bit_tests.exe` / `lib8bit_testsd.exe`.
+(Debug); the test binary is `lib8bit_tests` / `lib8bit_testsd`, with `.exe` on
+Windows.
 
 ## The app
 
@@ -92,26 +101,32 @@ the machine to BASIC.
 ## Embedding
 
 Link the `lib8bit` static library target and include `src/machine.h`. From CMake,
-`add_subdirectory` this repository and link `lib8bit::lib8bit`; the consuming
-project must use the same architecture, configuration and C runtime library.
+bring this repository in with `add_subdirectory` or `FetchContent` and link
+`lib8bit::lib8bit`: it then builds with the consumer's compiler, configuration and
+C runtime, and builds neither the app nor the test suite. A prebuilt library
+needs the same architecture, configuration and C runtime library as its host.
 
 `machine` owns a `machine_state` and is non-copyable. Feed it bytes
 (`load_prg`, `load_crt`, `load_sid`, `insert_disk`), step it with `exec(cycles)`,
-then read `framebuffer()` and `generate_audio()`. `app/app.cpp` is a complete
-worked host, and [docs/design.md](docs/design.md) explains the execution model.
+then read `framebuffer()` and `generate_audio()`. For a SID monitor,
+`machine::parse_sid` reads a tune's header without loading it, `capture_sid`
+snapshots the registers, envelope levels and write counts, `set_sid_voice_muted`
+silences a voice and `reset` cold-starts the machine. `app/app.cpp` is a
+complete worked host, and [docs/design.md](docs/design.md) explains the
+execution model.
 
 ## Tests
 
-`lib8bit_testsd.exe` runs ~190 assertions and returns non-zero on failure: every
+`lib8bit_testsd` runs about 210 checks and returns non-zero on failure: every
 documented CPU opcode with flags and cycle counts, pixel-exact VIC-II output for
 each graphics mode and for sprite collisions, CIA timer and interrupt behaviour,
 the assembler, a full KERNAL cold boot to the `READY.` prompt, keyboard input
 evaluating `PRINT 6*7` as `42`, key taps shorter than a frame typing intact
-through `queue_key`, RUN/STOP+RESTORE, SID audio including a real `.sid` tune, disk
-loading through the KERNAL (a machine-code routine calling `SETNAM`/`SETLFS`/
-`LOAD`, `LOAD"$",8` and the `FILE NOT FOUND` path), and the PRG/CRT/D64 fixtures
-in `test/` (resolved from the source path baked in at compile time, so nothing
-needs copying next to the executable).
+through `queue_key`, RUN/STOP+RESTORE, SID audio including a real `.sid` tune and
+the SID monitor hooks, disk loading through the KERNAL (a machine-code routine
+calling `SETNAM`/`SETLFS`/`LOAD`, `LOAD"$",8` and the `FILE NOT FOUND` path),
+and the PRG/CRT/D64 fixtures in `test/` (resolved from the source path baked in
+at compile time, so nothing needs copying next to the executable).
 
 It doubles as a small toolbox:
 

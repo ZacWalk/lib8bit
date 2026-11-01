@@ -516,6 +516,7 @@ uint8_t machine_state::sid_read(const uint16_t reg)
 void machine_state::sid_write(const uint16_t reg, const uint8_t value)
 {
 	sid_regs[reg & 0x1F] = value;
+	++sid_writes[reg & 0x1F];
 	if (audio_enabled) sid.write(reg & 0x1F, value, clock_ticks);
 	else sid.write_now(reg & 0x1F, value);
 }
@@ -755,6 +756,12 @@ void machine::exec(const int32_t tick_count)
 	if (!_key_queue.empty()) apply_queued_keys();
 	if (_state->sid_player.active) sid_player_step(*this);
 	cpu_exec(_state, tick_count);
+}
+
+void machine::reset()
+{
+	clear_keys();
+	_state->reset();
 }
 
 // On PAL systems, the CIA1 timer will count 16, 421 CPU cycles before doing another interrupt.
@@ -1121,6 +1128,23 @@ int machine::generate_audio(int16_t* buffer, const int max_samples)
 	return _state->sid.clock(static_cast<int>(cycles), buffer, start, max_samples);
 }
 
+void machine::capture_sid(sid_snapshot& out) const
+{
+	std::memcpy(out.regs, _state->sid_regs, sizeof(out.regs));
+	std::memcpy(out.writes, _state->sid_writes, sizeof(out.writes));
+	for (int v = 0; v < 3; ++v) out.envelope[v] = _state->sid.envelope_level(v);
+}
+
+void machine::set_sid_voice_muted(const int voice, const bool muted)
+{
+	_state->sid.set_voice_muted(voice, muted);
+}
+
+bool machine::sid_voice_muted(const int voice) const
+{
+	return _state->sid.voice_muted(voice);
+}
+
 namespace
 {
 	// PSID/RSID player driver memory layout. Everything lives in the cassette
@@ -1130,8 +1154,6 @@ namespace
 	constexpr uint16_t SID_IRQ_HANDLER = 0x0340; // simple handler (regs saved by kernal)
 	constexpr uint16_t SID_IRQ_FULL = 0x0360;    // full handler (saves its own regs)
 	constexpr uint16_t SID_DRIVER = 0x0390;      // main driver
-	constexpr uint32_t SID_CLOCK_PAL = 985248;
-	constexpr uint32_t SID_CLOCK_NTSC = 1022727;
 
 	uint16_t sid_be16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
 	uint32_t sid_be32(const uint8_t* p)
@@ -1166,6 +1188,70 @@ namespace
 		}
 		while (len > 0 && out[len - 1] == ' ') --len;
 		out[len] = '\0';
+	}
+
+	// A validated PSID/RSID image: the header as parse_sid() reports it, plus
+	// where the C64 program sits in the file and the header's speed word.
+	struct sid_image
+	{
+		sid_tune_info info;
+		const uint8_t* program = nullptr;
+		size_t program_len = 0;
+		uint32_t speed = 0;
+	};
+
+	bool read_sid_image(const uint8_t* data, const size_t size, sid_image& out)
+	{
+		if (!data || size < 0x7C) return false;
+
+		const uint32_t magic = sid_be32(data);
+		constexpr uint32_t PSID = 0x50534944; // "PSID"
+		constexpr uint32_t RSID = 0x52534944; // "RSID"
+		if (magic != PSID && magic != RSID) return false;
+
+		sid_tune_info& info = out.info;
+		info.rsid = magic == RSID;
+		info.version = sid_be16(data + 4);
+		const uint16_t data_offset = sid_be16(data + 6);
+		if (data_offset < 0x76 || data_offset >= size) return false;
+
+		const uint16_t load_address = sid_be16(data + 8);
+		uint16_t init_address = sid_be16(data + 10);
+		const uint16_t songs = sid_be16(data + 14);
+		const uint16_t start_song = sid_be16(data + 16);
+		const uint16_t flags = info.version >= 2 ? sid_be16(data + 118) : 0;
+
+		const uint8_t* program = data + data_offset;
+		size_t program_len = size - data_offset;
+		uint16_t actual_load = load_address;
+		if (load_address == 0)
+		{
+			if (program_len < 2) return false;
+			actual_load = static_cast<uint16_t>(program[0] | (program[1] << 8));
+			program += 2;
+			program_len -= 2;
+		}
+		if (init_address == 0) init_address = actual_load;
+		if (static_cast<size_t>(actual_load) + program_len > machine_state::RAM_SIZE) return false;
+
+		// The header fields are untrusted, so clamp the tune count into a range
+		// the driver's LDA #song can encode.
+		info.songs = songs > 0 ? (songs < 256 ? songs : 256) : 1;
+		info.start_song = start_song ? start_song : 1;
+		if (info.start_song > info.songs) info.start_song = info.songs;
+		info.chip_8580 = ((flags >> 4) & 0x03) == 2;
+		info.ntsc = ((flags >> 2) & 0x03) == 2;
+		info.load_address = actual_load;
+		info.init_address = init_address;
+		info.play_address = sid_be16(data + 12);
+		sid_header_text(info.title, data + 0x16);
+		sid_header_text(info.author, data + 0x36);
+		sid_header_text(info.released, data + 0x56);
+
+		out.program = program;
+		out.program_len = program_len;
+		out.speed = sid_be32(data + 18);
+		return true;
 	}
 
 	// A 1 KB page in VIC bank 0 for the player's text screen that the tune image
@@ -1354,58 +1440,38 @@ namespace
 	}
 }
 
+bool machine::parse_sid(const uint8_t* data, const size_t size, sid_tune_info& out)
+{
+	sid_image image;
+	if (!read_sid_image(data, size, image)) return false;
+	out = image.info;
+	return true;
+}
+
 bool machine::load_sid(const uint8_t* data, const size_t size, const int song)
 {
-	if (!data || size < 0x7C) return false;
+	sid_image image;
+	if (!read_sid_image(data, size, image)) return false;
 
-	const uint32_t magic = sid_be32(data);
-	constexpr uint32_t PSID = 0x50534944; // "PSID"
-	constexpr uint32_t RSID = 0x52534944; // "RSID"
-	if (magic != PSID && magic != RSID) return false;
+	const sid_tune_info& info = image.info;
+	const bool is_rsid = info.rsid;
+	const bool is_ntsc = info.ntsc;
+	const uint16_t actual_load = info.load_address;
+	const uint16_t init_address = info.init_address;
+	const uint16_t play_address = info.play_address;
+	const uint32_t speed = image.speed;
 
-	const bool is_rsid = magic == RSID;
-	const uint16_t version = sid_be16(data + 4);
-	const uint16_t data_offset = sid_be16(data + 6);
-	if (data_offset < 0x76 || data_offset >= size) return false;
-
-	const uint16_t load_address = sid_be16(data + 8);
-	uint16_t init_address = sid_be16(data + 10);
-	const uint16_t play_address = sid_be16(data + 12);
-	const uint16_t songs = sid_be16(data + 14);
-	const uint16_t start_song = sid_be16(data + 16);
-	const uint32_t speed = sid_be32(data + 18);
-	const uint16_t flags = version >= 2 ? sid_be16(data + 118) : 0;
-
-	const uint8_t* program = data + data_offset;
-	size_t program_len = size - data_offset;
-	uint16_t actual_load = load_address;
-	if (load_address == 0)
-	{
-		if (program_len < 2) return false;
-		actual_load = static_cast<uint16_t>(program[0] | (program[1] << 8));
-		program += 2;
-		program_len -= 2;
-	}
-	if (init_address == 0) init_address = actual_load;
-	if (static_cast<size_t>(actual_load) + program_len > machine_state::RAM_SIZE) return false;
-
-	const int clock_flag = (flags >> 2) & 0x03;
-	const bool is_ntsc = clock_flag == 2;
-	const int model_flag = (flags >> 4) & 0x03;
-
-	// 1-based song selection; fall back to the file's default. The header fields
-	// are untrusted, so clamp into a range the driver's LDA #song can encode.
-	const int max_song = songs > 0 ? (songs < 256 ? songs : 256) : 1;
-	int song_number = song > 0 ? song : (start_song ? start_song : 1);
-	if (song_number > max_song) song_number = max_song;
+	// 1-based song selection; fall back to the file's default.
+	int song_number = song > 0 ? song : info.start_song;
+	if (song_number > info.songs) song_number = info.songs;
 	if (song_number < 1) song_number = 1;
 	const uint8_t song0 = static_cast<uint8_t>(song_number - 1);
 
 	// Fresh machine, then load the tune image and the player driver.
 	_state->reset();
-	_state->sid.set_chip_model(model_flag == 2 ? sid_model::mos8580 : sid_model::mos6581);
+	_state->sid.set_chip_model(info.chip_8580 ? sid_model::mos8580 : sid_model::mos6581);
 
-	std::memcpy(_state->RAM + actual_load, program, program_len);
+	std::memcpy(_state->RAM + actual_load, image.program, image.program_len);
 
 	const bool use_cia = ((speed >> (song0 < 32 ? song0 : 31)) & 1) != 0;
 	const uint16_t timer = is_ntsc ? 0x4295 : 0x4025;
@@ -1517,16 +1583,16 @@ bool machine::load_sid(const uint8_t* data, const size_t size, const int song)
 	sid_player_state& p = _state->sid_player;
 	p.active = true;
 	p.file.assign(data, data + size);
-	sid_header_text(p.title, data + 0x16);
-	sid_header_text(p.author, data + 0x36);
-	sid_header_text(p.released, data + 0x56);
-	p.chip_8580 = model_flag == 2;
+	std::memcpy(p.title, info.title, sizeof(p.title));
+	std::memcpy(p.author, info.author, sizeof(p.author));
+	std::memcpy(p.released, info.released, sizeof(p.released));
+	p.chip_8580 = info.chip_8580;
 	p.timed_by_cia = use_cia;
-	p.songs = max_song;
+	p.songs = info.songs;
 	p.song = song_number;
 	p.start_ticks = _state->clock_ticks;
-	p.clock_hz = is_ntsc ? SID_CLOCK_NTSC : SID_CLOCK_PAL;
-	p.screen_base = sid_player_screen_base(actual_load, program_len);
+	p.clock_hz = is_ntsc ? sid_clock_ntsc : sid_clock_pal;
+	p.screen_base = sid_player_screen_base(actual_load, image.program_len);
 	sid_player_setup_video(*_state);
 	sid_player_paint(*_state);
 

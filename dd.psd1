@@ -11,6 +11,10 @@
             debug = 'debug'
             release = 'release'
         }
+        'x64-linux' = @{
+            debug = 'linux-debug'
+            release = 'linux-release'
+        }
     }
     targets = @(
         @{
@@ -18,9 +22,9 @@
             kind = 'library'
             'cmake-target' = 'lib8bit'
             'test-label' = 'lib8bit'
-            'debug-path' = 'build/debug/{libprefix}lib8bit{lib}'
-            'release-path' = 'build/release/{libprefix}lib8bit{lib}'
-            platforms = @('x64-windows')
+            'debug-path' = 'build/{platform}/debug/{libprefix}lib8bit{lib}'
+            'release-path' = 'build/{platform}/release/{libprefix}lib8bit{lib}'
+            platforms = @('x64-windows', 'x64-linux')
         },
         @{
             id = 'app'

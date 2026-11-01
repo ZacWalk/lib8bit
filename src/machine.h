@@ -33,6 +33,12 @@ constexpr uint8_t FLAG_SIGN = 0x80;
 // Memory map https://sta.c64.org/cbm64mem.html
 // Kernal disasm https://www.pagetable.com/c64ref/c64disasm/
 
+// The PAL frame the machine runs (63 cycles x 312 raster lines), and the clock
+// rates a tune's header can ask the SID to be driven at.
+constexpr int32_t pal_cycles_per_frame = 63 * 312;
+constexpr uint32_t sid_clock_pal = 985248;
+constexpr uint32_t sid_clock_ntsc = 1022727;
+
 constexpr uint32_t mem_length_of_keyboard_buffer = 0x00C6; // 0: Buffer is empty.1-10: Buffer length.
 constexpr uint32_t mem_keyboard_buffer = 0x0277; // Keyboard buffer (10 bytes)
 constexpr uint32_t mem_center_color = 0xd021;
@@ -158,6 +164,37 @@ struct sid_player_state
 	uint8_t peak[3] = {};     // decaying peak-hold marker per voice
 };
 
+// A PSID/RSID header as machine::parse_sid() reads it: enough to list or index
+// a tune without loading it. Text fields are trimmed and NUL-terminated, with
+// anything unprintable shown as a space.
+struct sid_tune_info
+{
+	bool rsid = false;
+	int version = 0;
+	char title[33] = {};
+	char author[33] = {};
+	char released[33] = {};
+	int songs = 1;          // 1..256
+	int start_song = 1;     // 1-based, within 1..songs
+	bool chip_8580 = false; // the model the header asks for; otherwise a 6581
+	bool ntsc = false;      // the clock the header asks for; otherwise PAL
+	uint16_t load_address = 0; // where the image lands, after an embedded address
+	uint16_t init_address = 0;
+	uint16_t play_address = 0; // 0 when the tune installs its own interrupt
+};
+
+// What a SID monitor shows. The chip's registers are write-only, so `regs` holds
+// the last value the CPU wrote to each one; `envelope` is each voice's live
+// level, which advances only while audio is being generated; `writes` counts the
+// CPU's writes to each register over the machine's lifetime, so the difference
+// between two snapshots is the activity in between.
+struct sid_snapshot
+{
+	uint8_t regs[32] = {};
+	uint8_t envelope[3] = {};
+	uint32_t writes[32] = {};
+};
+
 struct machine_state
 {
 	static constexpr size_t RAM_SIZE = 1024 * 64;
@@ -207,8 +244,10 @@ struct machine_state
 	sid_chip sid;  // MOS6581/8580 sound chip
 	cartridge cart; // optional .CRT cartridge (ROML/ROMH + bank switching)
 	// The SID registers are write-only, so keep the last value written to each
-	// for monitors to display.
+	// for monitors to display, and count the writes so a monitor can show which
+	// registers a tune is driving. The counts run for the machine's lifetime.
 	uint8_t sid_regs[32] = {};
+	uint32_t sid_writes[32] = {};
 
 	// --- Disk drive (device 8) ----------------------------------------------
 	// A mounted .d64/.d71/.d81 image, empty when the drive is empty. It survives
@@ -298,6 +337,11 @@ public:
 	void add_key(machine_key key);
 	void exec(int32_t tick_count = 1000000 / 50);
 
+	// Cold reset, as the power switch does: clears RAM and every chip, drops any
+	// held or queued keys and leaves a playing tune. A mounted disk and an
+	// inserted cartridge stay where they are, as they would in a real machine.
+	void reset();
+
 	// Raise an externally driven IRQ. Serviced at the next instruction boundary,
 	// so its 7-cycle entry is charged like any other interrupt.
 	void irq();
@@ -383,6 +427,9 @@ public:
 	// levels is painted into the emulated screen by exec(), which also reads the
 	// keyboard matrix: keys 1-9 pick a sub-tune and X stops playback.
 	bool load_sid(const uint8_t* data, size_t size, int song = 0);
+	// Read a PSID/RSID header without loading the tune. Accepts exactly the
+	// images load_sid() accepts and returns false for anything else.
+	static bool parse_sid(const uint8_t* data, size_t size, sid_tune_info& out);
 	bool sid_player_active() const;
 	int sid_song_count() const;
 	int sid_song() const; // 1-based, 0 when no tune is playing
@@ -400,6 +447,15 @@ public:
 	// the previous call, replaying SID register writes at cycle accuracy. Call
 	// once per frame after exec(). Returns the number of samples written.
 	int generate_audio(int16_t* buffer, int max_samples);
+
+	// Fill `out` with what a SID monitor shows (see sid_snapshot). Side-effect free.
+	void capture_sid(sid_snapshot& out) const;
+
+	// Silence a voice (0-2) in the output while it keeps running in the chip, so
+	// unmuting picks it up mid-note. A listening aid, not chip state: it survives
+	// reset() and a change of tune.
+	void set_sid_voice_muted(int voice, bool muted);
+	bool sid_voice_muted(int voice) const;
 
 private:
 	struct queued_key

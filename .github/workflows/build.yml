@@ -31,3 +31,50 @@ jobs:
       - name: Build and test Debug and Release
         shell: pwsh
         run: ./dd.ps1 test --non-interactive
+
+  # The library and its suite through the same dd driver and its Linux presets.
+  # The app is Windows-only, so Linux has no app and no manifest check.
+  linux:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++ cmake ninja-build
+
+      - name: Check native toolchain
+        shell: pwsh
+        run: ./dd.ps1 doctor --non-interactive
+
+      - name: Build and test Debug and Release
+        shell: pwsh
+        run: ./dd.ps1 test --non-interactive
+
+  # dd drives x64 only, so this job enters the x86 MSVC environment itself.
+  # Release is the configuration Diffractor ships at 32 bits.
+  windows-x86:
+    runs-on: windows-2025-vs2026
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Enter the x86 MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_x86
+
+      - name: Build and test Release
+        shell: pwsh
+        run: |
+          cmake -S . -B build/x86-windows/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build/x86-windows/release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ctest --test-dir build/x86-windows/release --output-on-failure --no-tests=error

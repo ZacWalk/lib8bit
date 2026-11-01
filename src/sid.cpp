@@ -627,11 +627,16 @@ int sid_filter::normalized_voice(voice* v) const
 
 void sid_filter::route_voices(voice& v1, voice& v2, voice& v3, int& vi, int& vo)
 {
-	const int a = normalized_voice(&v1);
-	const int b = normalized_voice(&v2);
+	// A muted voice is still clocked through output(): the waveform generator's
+	// state (combined-waveform writeback into the noise register) depends on it.
+	int a = normalized_voice(&v1);
+	int b = normalized_voice(&v2);
 	int c;
 	if (voice3off && !filt3) { v3.wave.output(); c = 0; }
 	else c = normalized_voice(&v3);
+	if (mute_mask & 0x01) a = 0;
+	if (mute_mask & 0x02) b = 0;
+	if (mute_mask & 0x04) c = 0;
 
 	vi = 0;
 	if (filt1) vi += a;
@@ -753,6 +758,19 @@ void sid_chip::reset()
 	sample_offset = 0;
 	output_value = 0;
 	voice_sync(false);
+}
+
+void sid_chip::set_voice_muted(const int v, const bool muted)
+{
+	if (v < 0 || v > 2) return;
+	const uint8_t bit = static_cast<uint8_t>(1 << v);
+	const uint8_t mask = filter.get_mute_mask();
+	filter.set_mute_mask(muted ? (mask | bit) : (mask & ~bit));
+}
+
+bool sid_chip::voice_muted(const int v) const
+{
+	return v >= 0 && v <= 2 && (filter.get_mute_mask() & (1 << v)) != 0;
 }
 
 uint8_t sid_chip::read(uint16_t offset)
