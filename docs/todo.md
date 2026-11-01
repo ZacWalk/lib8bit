@@ -104,17 +104,13 @@ Two approximations in what *is* implemented:
 
 ## Host application
 
-Crash and data-loss paths are closed. Remaining:
+The app now uses libdesktop for the window, runtime menu, pixel presentation and
+audio stream. Crash and data-loss paths are closed. Remaining:
 
 | | |
 |---|---|
-| `waveOutWrite` failure becomes a hot spin | A persistently failing device (removal, driver reset) leaves the `TIME_CRITICAL` audio thread busy-looping. No failure counter, no fallback to the no-audio path. |
-| `audio_engine::start` leaks prepared headers | If `waveOutPrepareHeader` fails partway, earlier headers are not unprepared before `waveOutClose`. |
-| `MAX_PATH` buffer in the Open dialog | Paths over 259 characters fail silently. Drag-and-drop sizes correctly and handles them. |
-| `load_file` holds the machine lock across 3M cycles | Every load stalls the emulation thread and drains the audio queue, producing a brief audible glitch. |
-| One frame of stale debug data | The panel renders whatever snapshot was last published until the next frame. Self-corrects in ~20 ms. |
-| The debug panel opened during a pause is stale until resumed | Snapshots are captured once per emulated frame, and only while the panel is open, so a pause leaves the one from when the panel was last open (zeros if never) on screen until the machine runs again. |
-| `WM_DROPFILES` does not foreground the window | A drop onto a background window loads the file but leaves focus elsewhere. |
+| `MAX_PATH` buffer in libdesktop's Open dialog | Paths over 259 characters fail silently until the shared dialog grows a dynamically sized buffer. Drag-and-drop uses the platform's decoded path and handles them. |
+| A refused audio block ends the device-clock path | The app diagnoses a `write()` refusal after `can_write()` and switches to fixed 50 Hz pacing; the shared stream remains responsible for device lifetime. |
 
 ## API
 

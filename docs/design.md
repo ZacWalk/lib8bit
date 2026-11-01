@@ -10,7 +10,7 @@ Two pieces, with a hard boundary between them:
 | | |
 |---|---|
 | `src/` | The emulator. Platform independent: no Windows headers, no file system, no threads. Builds the `lib8bit` static library with MSVC or GCC. |
-| `app/` | A Win32 host. Owns the window, GDI, waveOut, menus and the settings file. |
+| `app/` | A Windows host built on libdesktop. Owns media files, the C64 input map, menus, the pixel surface, settings and the frame/audio loop. |
 | `test/` | A console harness that drives the library headlessly. |
 
 The library takes bytes and returns bytes. The host reads files, the library
@@ -202,7 +202,7 @@ geometry, so a malformed image cannot read outside the caller's buffer.
 
 ## Introspection
 
-`debug_capture()` fills a `debug_state` with the CPU, banking, VIC, CIA and SID
+`capture_debug()` fills a `debug_state` with the CPU, banking, VIC, CIA and SID
 state plus a disassembly window around the PC. It is strictly side-effect free:
 latching registers are read from the emulated chip state, never through the bus,
 so a debug overlay can never acknowledge an interrupt out from under a program.
@@ -212,19 +212,33 @@ used by tests and available to hosts.
 
 ## Host application
 
-`app/app.cpp` runs three threads:
+`app/app.cpp` is a libdesktop application. `app_init()` binds a
+`pf::frame_reactor`, installs the runtime menu tree and boots the machine;
+libdesktop owns the native window and message loop. A dedicated
+`pf::serial_executor` emulates one PAL frame at a time and publishes a
+triple-buffered snapshot. The UI loop only pumps
+`pf::platform_events()`/UI tasks and presents the newest snapshot through
+`pf::window_frame::present_pixels()`. Repaints use the same surface through
+`pf::draw_context::draw_bitmap()`, so a paused or uncovered window is never
+replaced by a stale direct blit.
 
-- **Emulation** — one PAL frame per iteration, publishing into a triple-buffered
-  frame and pushing the frame's samples onto a bounded queue.
-- **Audio** — drains that queue into waveOut buffers. The sound card consumes at
-  a fixed rate, so the queue's back-pressure paces emulation at exactly real
-  time. No timer is involved. The audio thread never blocks on the queue.
-- **UI** — owns the window; takes the newest frame under a lock held just long
-  enough to swap two indices, so a slow repaint cannot stall emulation.
+The app's `pf::audio_stream` is the worker's real-time clock when a device is
+available: the worker does not execute another PAL frame until the stream
+accepts the current PCM block. If the device cannot start, or a stream refuses
+a block after the capacity check, the worker diagnoses the rejection and
+switches to the fixed 50 Hz wall-clock fallback. The stream's bounded block
+queue is deliberately checked before `generate_audio()`, so a full ring cannot
+advance the SID clock and discard that frame. The offscreen `-test` path uses a
+fake public `pf::audio_stream` to pin both refusal paths without opening an
+audio device.
 
-All access to the machine is under one mutex. Errors are reported *after* it is
-released, because `MessageBoxW` re-enters `WM_KILLFOCUS`, which wants the same
-non-recursive lock.
+The host mutex only serializes machine control operations against the worker;
+painting never takes it and never touches the machine. There is no private OS
+window wrapper. Key presses and releases arrive through
+`frame_reactor::handle_keyboard()` and still use
+`machine::queue_key`, so a tap shorter than a frame lasts for one emulated
+frame. RESTORE remains the separate NMI pulse, joystick taps are latched until
+the next frame, and focus loss releases both matrix and joystick state.
 
 Key presses and releases reach the machine through `machine::queue_key`, and
 each `exec()` applies the queued changes at most one per key, so every press
@@ -234,12 +248,13 @@ two bursts — every key the On-Screen Keyboard or a macro tool types. Joystick
 presses are latched the same way until the next frame reads them. While paused,
 nothing runs a frame, so keys go straight to the matrix.
 
-The client area is composed into a single 32-bit DIB and presented with one
-`BitBlt`: nearest-neighbour integer scaling for the picture, and a debug panel
-drawn with the C64's own character ROM. No GDI fonts or stretch blits.
-
-Window geometry and the debug panel's width and visibility persist to
-`%APPDATA%\lib8bit\lib8bit.ini`.
+The client area is composed into an app-owned `pf::bitmap`: nearest-neighbour
+integer scaling for the picture, and a debug panel drawn with the C64's own
+character ROM. Presentation and painting go through libdesktop; the app names
+no GDI object, HWND or audio device. Window geometry and the debug panel's
+width and visibility persist through an explicit shared INI store at the old
+roaming `%APPDATA%\\lib8bit\\lib8bit.ini` location, with the original sections
+and keys.
 
 ## Rules that keep this working
 

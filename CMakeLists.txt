@@ -7,7 +7,24 @@ project(lib8bit LANGUAGES CXX VERSION 1.0.0)
 # Windows-only, and neither the app nor the suite is built when another project
 # brings lib8bit in through add_subdirectory or FetchContent.
 include(CMakeDependentOption)
-cmake_dependent_option(LIB8BIT_BUILD_APP "Build the Win32 test app" ON "WIN32;PROJECT_IS_TOP_LEVEL" OFF)
+cmake_dependent_option(LIB8BIT_BUILD_APP "Build the Windows test app" ON "WIN32;PROJECT_IS_TOP_LEVEL" OFF)
+
+if(LIB8BIT_BUILD_APP)
+    # Use the sibling checkout while developing, but keep a published commit
+    # in the project so a clean configure is reproducible.
+    if(NOT DEFINED FETCHCONTENT_SOURCE_DIR_LIBDESKTOP
+       AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../libdesktop/CMakeLists.txt")
+        set(FETCHCONTENT_SOURCE_DIR_LIBDESKTOP "${CMAKE_CURRENT_SOURCE_DIR}/../libdesktop"
+            CACHE PATH "Local libdesktop checkout to build against")
+    endif()
+
+    include(FetchContent)
+    FetchContent_Declare(libdesktop
+        GIT_REPOSITORY https://github.com/ZacWalk/libdesktop.git
+        GIT_TAG        31aae322af6e0696a9597726705b1121bd31580b
+    )
+    FetchContent_MakeAvailable(libdesktop)
+endif()
 
 function(lib8bit_warnings target)
     if(MSVC)
@@ -48,17 +65,17 @@ target_include_directories(lib8bit PUBLIC src)
 lib8bit_warnings(lib8bit)
 
 if(LIB8BIT_BUILD_APP)
-    enable_language(RC)
-
-    add_executable(app8bit WIN32
-        app/app.cpp
-        app/app.rc
-        app/app.manifest
+    platform_add_app(app8bit
+        SOURCES     app/app.cpp
+        ICON        app/res/c64.ico
+        DESCRIPTION "lib8bit - Commodore 64 emulator"
+        OUTPUT_NAME app8bit
     )
     target_link_libraries(app8bit PRIVATE lib8bit::lib8bit)
-    target_include_directories(app8bit PRIVATE app)
-    target_compile_definitions(app8bit PRIVATE WIN32 _WINDOWS UNICODE _UNICODE)
     lib8bit_warnings(app8bit)
+    if(MSVC)
+        target_compile_options(app8bit PRIVATE /EHsc)
+    endif()
 
     set_target_properties(app8bit PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin"
@@ -96,5 +113,8 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
         add_test(NAME lib8bit_app_manifest COMMAND "${CMAKE_COMMAND}"
             "-DEXE=$<TARGET_FILE:app8bit>" -P "${PROJECT_SOURCE_DIR}/test/manifest.cmake")
         set_tests_properties(lib8bit_app_manifest PROPERTIES TIMEOUT 30 LABELS lib8bit)
+
+        add_test(NAME lib8bit_app_headless COMMAND "$<TARGET_FILE:app8bit>" -test)
+        set_tests_properties(lib8bit_app_headless PROPERTIES TIMEOUT 120 LABELS lib8bit)
     endif()
 endif()

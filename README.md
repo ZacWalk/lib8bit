@@ -3,7 +3,7 @@
 [![Build](https://github.com/ZacWalk/lib8bit/actions/workflows/build.yml/badge.svg)](https://github.com/ZacWalk/lib8bit/actions/workflows/build.yml)
 
 A compact Commodore 64 emulator packaged as a C++20 static library, plus a small
-Win32 app that drives it.
+Windows app built on the shared libdesktop platform layer.
 
 The library is platform independent and does no file I/O — the host supplies
 bytes, the library returns a frame buffer and audio samples. It is intended for
@@ -40,21 +40,23 @@ clocks.
 | Path | Contents |
 |------|----------|
 | `src/` | The emulator. Platform independent — no Windows headers, no file system. Builds the `lib8bit` static library. |
-| `app/` | Win32 test app: GDI video, waveOut audio, menus, drag-and-drop. |
+| `app/` | Windows host: libdesktop window/frame reactor, pixel presentation, audio stream, menus, drag-and-drop and C64 input mapping. |
 | `test/` | Command-line behavioural test suite and its fixtures. |
 | `docs/` | [design.md](docs/design.md) (architecture) and [todo.md](docs/todo.md) (gaps). |
 
 ## Build and run
 
 The library and its test suite build on Windows with Visual Studio, x64 and
-x86, and on Linux with GCC 13; the app is Windows-only. On Windows the vendored
+x86, and on Linux with GCC 13; the app is Windows-only. The app uses the
+published libdesktop revision pinned in `CMakeLists.txt` (a sibling checkout is
+used for local development). On Windows the vendored
 [dd](https://github.com/ZacWalk/dd) runtime locates Visual Studio and uses the
 CMake and Ninja that ship with it.
 
 ```powershell
 .\dd.ps1 build        # both configurations
-.\dd.ps1 test         # build and run the emulator suite
-.\dd.ps1 launch       # build Release, then start the Win32 app
+.\dd.ps1 test         # build and run the emulator and offscreen host suites
+.\dd.ps1 launch       # build Release, then start the Windows app
 ```
 
 On Linux, with `g++`, `cmake` and `ninja-build` installed:
@@ -77,8 +79,8 @@ running machine alone. A disk image stays in the drive after its first program
 starts, so games that load more data as they run work. The title bar always
 states the current machine state:
 media, input mode, pause, and whether audio started. Window position and the
-debug panel's width and visibility are remembered in
-`%APPDATA%\lib8bit\lib8bit.ini`.
+debug panel's width and visibility are remembered in the original roaming
+`%APPDATA%\lib8bit\lib8bit.ini` file through libdesktop's shared INI store.
 
 | | |
 |---|---|
@@ -115,6 +117,12 @@ silences a voice and `reset` cold-starts the machine. `app/app.cpp` is a
 complete worked host, and [docs/design.md](docs/design.md) explains the
 execution model.
 
+The executable statically links [libdesktop](https://github.com/ZacWalk/libdesktop)
+under LGPL-2.1-or-later. A binary distribution must include the library's
+notices, licence, corresponding source (including modifications), and the
+application objects or build instructions needed to relink it with a modified
+libdesktop.
+
 ## Tests
 
 `lib8bit_testsd` runs about 210 checks and returns non-zero on failure: every
@@ -127,6 +135,13 @@ the SID monitor hooks, disk loading through the KERNAL (a machine-code routine
 calling `SETNAM`/`SETLFS`/`LOAD`, `LOAD"$",8` and the `FILE NOT FOUND` path),
 and the PRG/CRT/D64 fixtures in `test/` (resolved from the source path baked in
 at compile time, so nothing needs copying next to the executable).
+
+On Windows, CTest also runs `app8bit -test` with libdesktop's offscreen GUI
+mode. It checks integer-nearest layout and surface presentation, the
+`draw_context` repaint path, keyboard matrix taps, RESTORE/NMI, joystick
+tap/release handling, the background snapshot worker, minimum client size,
+capture-loss cleanup, end-session settings, splitter input and the bounded
+`pf::audio_stream` adapter without showing or focusing a window.
 
 It doubles as a small toolbox:
 
